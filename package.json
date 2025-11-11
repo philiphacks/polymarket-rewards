@@ -1,0 +1,11 @@
+{
+  "name": "rewards-farmer",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "main.js",
+  "dependencies": {
+    "@ethersproject/wallet": "^5.7.0",
+    "@polymarket/clob-client": "^4.22.8",
+    "dotenv": "^17.2.3"
+  }
+}
