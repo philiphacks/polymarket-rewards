@@ -6,6 +6,7 @@
   "dependencies": {
     "@ethersproject/wallet": "^5.7.0",
     "@polymarket/clob-client": "^4.22.8",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "node-cron": "^4.2.1"
   }
 }
