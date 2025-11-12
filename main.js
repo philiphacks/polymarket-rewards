@@ -5,6 +5,12 @@
 // https://github.com/Polymarket/clob-client/blob/main/examples/cancelOrder.ts
 // https://docs.polymarket.com/developers/CLOB/clients
 
+// TODO:
+// Add dynamic tick size
+// Add support for different tick sizes & multiple submarkets within 1 market
+// Better hedging
+// One-side betting (i.e. no hedging)
+
 import 'dotenv/config';
 import cron from "node-cron";
 import clob from "@polymarket/clob-client";
@@ -97,6 +103,20 @@ async function cancelAllOpenOrders(client, opts = {}) {
   };
 }
 
+const getSlugsForMarket = async (eventSlug) => {
+  const res = await fetch(`https://gamma-api.polymarket.com/events/slug/${eventSlug}`);
+  const data = await res.json();
+  const links = data.markets.map(m => ({
+    title: m.question || m.ticker || m.slug,
+    slug: m.slug,
+    url: `https://polymarket.com/market/${m.slug}`,
+  }));
+
+  // TODO:
+  // Return markets that are 75/25 at least
+  // Return markets with rewards only
+} 
+
 const getTokenIdsBySlugDataAPI = async (slug) => {
   const res = await fetch(`https://gamma-api.polymarket.com/markets/slug/${slug}`);
   const data = await res.json();
@@ -107,6 +127,7 @@ const getTokenIdsBySlugDataAPI = async (slug) => {
   const midpoint = parseFloat(Number(m['bestBid'] + m['bestAsk']) / 2.0);
   const buyUpPrice = roundHalfUp((midpoint - Number(Math.floor(m['rewardsMaxSpread']) / 100.0)), 3);
   const sellUpPrice = roundHalfUp((midpoint + Number(Math.floor(m['rewardsMaxSpread']) / 100.0)), 3);
+  console.log(m);
   return {
     rewardsMinSize: m['rewardsMinSize'],
     rewardsMaxSpread: m['rewardsMaxSpread'],
@@ -115,9 +136,15 @@ const getTokenIdsBySlugDataAPI = async (slug) => {
     bestAsk: m['bestAsk'],
     midpoint: roundHalfUp(midpoint),
     buyUpPrice: roundHalfUp(buyUpPrice),
-    buyDownPrice: roundHalfUp(1 - sellUpPrice)
+    buyDownPrice: roundHalfUp(1 - sellUpPrice),
+    negRisk: !!m['negRisk'],
+    tickSize: m['orderPriceMinTickSize']
   }
 };
+
+const TICK = 0.01;
+const snap = (p, t=TICK) => Math.round(p / t) * t; // nearest tick
+const toUnits = (x) => BigInt(Math.round(x * 1e6)); // USDC 6dp
 
 const exec = async () => {
   const creds = await credsP; // { key, secret, passphrase }
@@ -131,27 +158,53 @@ const exec = async () => {
   // console.log('markets count:', markets?.count);
 
   const slugs = [
-    { id: 'abnb-up-or-down-on-november-12-2025', size: 250 },
-    { id: 'will-the-government-shutdown-end-november-12-365', size: 250 },
-    { id: '', size: 250 }
+    // { id: 'will-the-government-shutdown-end-november-12-365', budget: 250 },
+
+    { id: 'abnb-up-or-down-on-november-12-2025', budget: 250 },
+    // { id: 'fed-decreases-interest-rates-by-25-bps-after-december-2025-meeting', budget: 250 },
+    { id: 'will-gemini-3pt0-be-released-by-november-22-442', budget: 450 },
+    { id: 'will-gemini-3pt0-be-released-by-november-30-643-555', budget: 450 },
+
+    // { id: 'will-uniswap-labs-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-uniswap-foundation-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-1inch-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-aave-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-across-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-anchorage-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-angstrom-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-arbitrum-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-atrium-academy-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-avalanche-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-aztec-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-bungee-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-crecimiento-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-eigencloud-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-espacio-cripto-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-layerzero-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-morpho-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-openzeppelin-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-privy-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-walletconnect-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-wormhole-win-2025-uniswap-cup', budget: 250 },
+    // { id: 'will-zora-win-2025-uniswap-cup', budget: 250 },
   ];
 
   // For each slug, fetch the market
-  await asyncForEach(slugs, async (slugObject) => {
-    const market = await getTokenIdsBySlugDataAPI(slugObject['id']);
+  for (const { id: slug, budget } of slugs) {
+    await sleep(1000);
+    const market = await getTokenIdsBySlugDataAPI(slug);
     console.log(market);
-    const up = market['tokenIds'][0];
-    const down = market['tokenIds'][1];
-
-    // console.log("Up book:", await client.getOrderBook(up));
-    // console.log("Down book:", await client.getOrderBook(down));
+    const upId = market['tokenIds'][0];
+    const downId = market['tokenIds'][1];
+    const upBook = await client.getOrderBook(upId);
+    const downBook = await client.getOrderBook(downId);
 
     // cancel open orders
     const n = await cancelAllOpenOrders(client, { tokenID: market['tokenIds'] });
     console.log(n);
 
     // place bid
-    const size = slugObject['size'];
+    const size = budget;
     const priceUp = market['buyUpPrice'];
     const priceDown = market['buyDownPrice'];
     // const gtc = await client.createAndPostOrder(
@@ -160,30 +213,80 @@ const exec = async () => {
     //   OrderType.GTC
     // );
     // console.log('GTC result:', gtc);
-    const expiresAt = Math.floor(Date.now()/1000) + 10*60; // 10 minutes
-    const cost = BigInt(Math.round(priceUp*1e6)) * BigInt(size);
-    if (BigInt(ba.balance) < cost) throw new Error('Insufficient USDC on funder');
+    // const expiresAt = Math.floor(Date.now()/1000) + 10*60; // 10 minutes
+    // const cost = BigInt(Math.round(priceUp*1e6)) * BigInt(size);
+    // if (BigInt(ba.balance) < cost) throw new Error('Insufficient USDC on funder');
 
-    let gtd = await client.createAndPostOrder(
-      { tokenID: market.tokenIds[0], price: priceUp, side: Side.BUY, size: parseInt(size / priceUp, 10), expiration: String(expiresAt) },
-      { tickSize: '0.01', negRisk: false },
-      OrderType.GTD
-    );
-    console.log('GTD result:', gtd);
+    // let gtd = await client.createAndPostOrder(
+    //   { tokenID: market.tokenIds[0], price: priceUp, side: Side.BUY, size: parseInt(size / priceUp, 10), expiration: String(expiresAt) },
+    //   { tickSize: '0.01', negRisk: false },
+    //   OrderType.GTD
+    // );
+    // console.log('GTD result:', gtd);
 
-    await sleep(1000);
+    // await sleep(1000);
 
-    gtd = await client.createAndPostOrder(
-      { tokenID: market.tokenIds[1], price: priceDown, side: Side.BUY, size: parseInt(size / priceDown, 10), expiration: String(expiresAt) },
-      { tickSize: '0.01', negRisk: false },
-      OrderType.GTD
-    );
-    console.log('GTD result:', gtd);
-  });
+    // gtd = await client.createAndPostOrder(
+    //   { tokenID: market.tokenIds[1], price: priceDown, side: Side.BUY, size: parseInt(size / priceDown, 10), expiration: String(expiresAt) },
+    //   { tickSize: '0.01', negRisk: false },
+    //   OrderType.GTD
+    // );
+    // console.log('GTD result:', gtd);
+
+    {
+      const raw = market.buyUpPrice;
+      const price = snap(raw, TICK);           // ensure on tick
+      const shares = Math.floor(budget / price);  // shares integer
+      console.log('SHARES:', budget, raw, price, shares);
+      if (shares >= 5 && raw > 0) {                       // respect orderMinSize
+        const cost = toUnits(price) * BigInt(shares);
+        if (BigInt(ba.balance) >= cost) {
+          const expiresAt = Math.floor(Date.now()/1000) + 20*60; // +20m
+          const resp = await client.createAndPostOrder(
+            { tokenID: upId, price, side: Side.BUY, size: shares, expiration: String(expiresAt) },
+            { tickSize: market['tickSize'], negRisk: market['negRisk'] },
+            OrderType.GTD
+          );
+          console.log('UP GTD:', resp);
+        } else {
+          console.log('UP skipped: insufficient USDC');
+        }
+      } else {
+        console.log('UP skipped: size < min (5)');
+      }
+    }
+
+    await sleep(500);
+
+    {
+      const raw = market.buyDownPrice;
+      const price = snap(raw, TICK);
+      const shares = Math.floor(budget / price);
+      if (shares >= 5 && raw > 0) {
+        const cost = toUnits(price) * BigInt(shares);
+        const ba2 = await client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL }); // refresh
+        if (BigInt(ba2.balance) >= cost) {
+          const expiresAt = Math.floor(Date.now()/1000) + 20*60;
+          const resp = await client.createAndPostOrder(
+            { tokenID: downId, price, side: Side.BUY, size: shares, expiration: String(expiresAt) },
+            { tickSize: market['tickSize'], negRisk: market['negRisk'] },
+            OrderType.GTD
+          );
+          console.log('DOWN GTD:', resp);
+        } else {
+          console.log('DOWN skipped: insufficient USDC');
+        }
+      } else {
+        console.log('DOWN skipped: size < min (5)');
+      }
+    }
+  };
 };
 
+exec();
+
 // every 10 mins: '*/10 * * * *'
-cron.schedule('0/10 * * * *', () => {
-  console.log('10 mins passed... running poly bids');
+cron.schedule('0/20 * * * *', () => {
+  console.log('20 mins passed... running poly bids');
   exec();
 });
