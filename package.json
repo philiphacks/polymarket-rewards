@@ -7,6 +7,9 @@
     "@ethersproject/wallet": "^5.7.0",
     "@polymarket/clob-client": "^4.22.8",
     "dotenv": "^17.2.3",
-    "node-cron": "^4.2.1"
+    "ethers": "^6.15.0",
+    "eventsource": "^4.0.0",
+    "node-cron": "^4.2.1",
+    "viem": "^2.39.0"
   }
 }
