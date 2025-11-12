@@ -5,10 +5,14 @@
 // https://github.com/Polymarket/clob-client/blob/main/examples/cancelOrder.ts
 // https://docs.polymarket.com/developers/CLOB/clients
 
-// TODO:
-// Hedging
+// *****************************
+// **          TODO           **
+// *****************************
+// 1. Hedging
 // Once have hedging
-// Add aggressive flag to do aggressive orders or not (i.e. closer to midpoint, now everything goes conservative)
+// 2. Add aggressive flag to do aggressive orders or not (i.e. closer to midpoint, now everything goes conservative)
+// 3. Scan Polymarket for YES/NO best asks <$1 (inefficient markets)
+// 4. Automate incentivised market & slug finding in getSlugsForMarket
 
 import 'dotenv/config';
 import cron from "node-cron";
@@ -113,10 +117,6 @@ const getSlugsForMarket = async (eventSlug) => {
     slug: m.slug,
     url: `https://polymarket.com/market/${m.slug}`,
   }));
-
-  // TODO:
-  // Return markets that are 75/25 at least
-  // Return markets with rewards only
 } 
 
 const getTokenIdsBySlugDataAPI = async (client, slug) => {
