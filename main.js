@@ -8,11 +8,14 @@
 // *****************************
 // **          TODO           **
 // *****************************
-// 1. Hedging
-// Once have hedging
-// 2. Add aggressive flag to do aggressive orders or not (i.e. closer to midpoint, now everything goes conservative)
+// 1. Hedging. If books are thin, try selling shares instead of hedging.
+// 2. Once have hedging, Add aggressive flag to do aggressive orders or not (i.e. closer to midpoint, now everything goes conservative)
 // 3. Scan Polymarket for YES/NO best asks <$1 (inefficient markets)
 // 4. Automate incentivised market & slug finding in getSlugsForMarket
+
+// Findings
+// $8000 USDC deposited
+// Testing hedging
 
 import 'dotenv/config';
 import cron from "node-cron";
@@ -43,6 +46,13 @@ function roundHalfUp(x, decimals = 2) {
   const n = x * factor;
   // half-up: push .5 up for positives and more negative for negatives
   const i = n >= 0 ? Math.floor(n + 0.5) : Math.ceil(n - 0.5);
+  return i / factor;
+}
+
+function roundHalfDown(x, decimals = 2) {
+  const factor = 10 ** decimals;
+  const n = x * factor;
+  const i = n >= 0 ? Math.ceil(n - 0.5) : Math.floor(n + 0.5);
   return i / factor;
 }
 
@@ -126,12 +136,16 @@ const getTokenIdsBySlugDataAPI = async (client, slug) => {
   if (!m) throw new Error(`Market with slug "${slug}" not found (Data API)`);
 
   const tokenIds = JSON.parse(m['clobTokenIds']);
+  console.log(m['bestBid'], m['bestAsk']);
   const midpoint = parseFloat(Number(m['bestBid'] + m['bestAsk']) / 2.0);
+  const spread = m['rewardsMaxSpread'] / 100.0;
   const buyUpPrice = roundHalfUp((midpoint - Number(Math.floor(m['rewardsMaxSpread']) / 100.0)), 3);
   const sellUpPrice = roundHalfUp((midpoint + Number(Math.floor(m['rewardsMaxSpread']) / 100.0)), 3);
-  console.log(m);
-  const midpoints = await client.getMidpoints([{ token_id: tokenIds[0] }, { token_id: tokenIds[1] }]);
-  console.log(midpoints);
+  // const buyUpPrice = Math.max(midpoint - spread, 0);
+  // const sellUpPrice = Math.min(midpoint + spread, 1);
+  // console.log(m);
+  // const midpoints = await client.getMidpoints([{ token_id: tokenIds[0] }, { token_id: tokenIds[1] }]);
+  // console.log(midpoints);
 
   return {
     rewardsMinSize: m['rewardsMinSize'],
@@ -139,7 +153,7 @@ const getTokenIdsBySlugDataAPI = async (client, slug) => {
     tokenIds,
     bestBid: m['bestBid'],
     bestAsk: m['bestAsk'],
-    midpoint: roundHalfUp(midpoint),
+    midpoint,
     buyUpPrice: roundHalfUp(buyUpPrice),
     buyDownPrice: roundHalfUp(1 - sellUpPrice),
     negRisk: !!m['negRisk'],
@@ -182,38 +196,40 @@ const exec = async () => {
   // console.log('markets count:', markets?.count);
 
   const slugs = [
-    // { id: 'abnb-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'rklb-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'open-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'pltr-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'nya-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'nflx-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'rut-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'nvda-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'hsi-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'tsla-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'dax-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'meta-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'ukx-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'googl-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'dji-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'ndx-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'amzn-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'nik-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'msft-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'aapl-up-or-down-on-november-13-2025', budget: 500 },
-    // { id: 'spx-up-or-down-on-november-13-2025', budget: 500 },
+    // { id: 'dax-up-or-down-on-november-13-2025', budget: 150 },
+    // { id: 'nik-up-or-down-on-november-13-2025', budget: 150 },
+
+    { id: 'abnb-up-or-down-on-november-14-2025', budget: 100 },
+    { id: 'msft-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'aapl-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'open-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'rklb-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'pltr-up-or-down-on-november-14-2025', budget: 300 },
+    { id: 'nya-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'nflx-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'rut-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'nvda-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'meta-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'googl-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'tsla-up-or-down-on-november-14-2025', budget: 150 },
+
+    { id: 'dji-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'ukx-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'ndx-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'amzn-up-or-down-on-november-14-2025', budget: 150 },
+    { id: 'spx-up-or-down-on-november-14-2025', budget: 150 },
+
     { id: 'will-jos-antonio-kast-win-the-chilean-presidential-election', budget: 1000 },
 
     // { id: 'will-gemini-3pt0-be-released-by-november-22-442', budget: 1000 },
     // { id: 'will-gemini-3pt0-be-released-by-november-30-643-555', budget: 1000 },
 
-    { id: 'paradex-fdv-above-750m-one-day-after-launch', budget: 400 },
+    // { id: 'paradex-fdv-above-750m-one-day-after-launch', budget: 400 },
     // { id: 'paradex-fdv-above-1pt5b-one-day-after-launch', budget: 400 },
     // { id: 'paradex-fdv-above-3b-one-day-after-launch', budget: 400 },
     // { id: 'paradex-fdv-above-5b-one-day-after-launch', budget: 400 },
 
-    // { id: 'fed-decreases-interest-rates-by-25-bps-after-december-2025-meeting', budget: 400 },
+    // { id: 'fed-decreases-interest-rates-by-25-bps-after-december-2025-meeting', budget: 2000 },
 
     // { id: 'will-uniswap-labs-win-2025-uniswap-cup', budget: 400 },
     // { id: 'will-uniswap-foundation-win-2025-uniswap-cup', budget: 400 },
@@ -237,7 +253,7 @@ const exec = async () => {
     // { id: 'will-walletconnect-win-2025-uniswap-cup', budget: 400 },
     // { id: 'will-wormhole-win-2025-uniswap-cup', budget: 400 },
     // { id: 'will-zora-win-2025-uniswap-cup', budget: 400 },
-    // { id: 'will-zksync-win-2025-uniswap-cup', budget: 400 }
+    { id: 'will-zksync-win-2025-uniswap-cup', budget: 400 }
   ];
 
   // For each slug, fetch the market
@@ -254,6 +270,7 @@ const exec = async () => {
     const n = await cancelAllOpenOrders(client, { tokenID: market['tokenIds'] });
     console.log(n);
 
+    continue;
     // place bid
     const size = budget;
     const priceUp = market['buyUpPrice'];
@@ -372,15 +389,15 @@ const calculateAndHedgeInventory = async () => {
   // const market = await getTokenIdsBySlugDataAPI(client, 'abnb-up-or-down-on-november-13-2025?tid=1762976765251');
 
   // Example to hedge
-  const sharesBought = 54.0;
-  const priceBought = 0.47;
-  const bestAsk = 0.53;
+  const sharesBought = 157.0;
+  const priceBought = 0.21;
+  const bestAsk = 0.99;
   const amountToHedge = (sharesBought * priceBought) / (1.0 - bestAsk);
   console.log(`Spent $${sharesBought * priceBought}. Need to buy`, Number(amountToHedge).toFixed(0), `shares for a total of $${Number(amountToHedge * bestAsk).toFixed(0)}`);
 };
 
-// exec();
-calculateAndHedgeInventory();
+exec();
+// calculateAndHedgeInventory();
 
 const runCron = false;
 if (runCron) {
