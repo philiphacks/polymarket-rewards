@@ -538,5 +538,8 @@ async function execAll() {
 }
 
 let task = cron.schedule(`*/${interval} * * * * *`, async () => {
-  await execAll();
+  await execAll().catch((err) => {
+    console.error('Fatal error in main():', err);
+    process.exit(1);
+  });
 });
