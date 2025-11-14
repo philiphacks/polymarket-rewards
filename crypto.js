@@ -7,6 +7,7 @@ import fs from "fs";
 
 // ---------- CONFIG (EDIT THESE) ----------
 let interval = 5; // seconds
+const MAX_REL_DIFF = 0.05; // 5%
 
 // Returns the unix timestamp (seconds) of the start of the current 15-min interval
 function current15mStartUnix(date = new Date()) {
@@ -164,7 +165,7 @@ function sleep(ms) {
   });
 };
 
-const exec = async (cronTask) => { 
+const exec = async () => { 
   // 1) Fetch market from Gamma (fields known from your JSON)
   const gammaRes = await fetch(GAMMA_URL);
   if (!gammaRes.ok) {
@@ -198,7 +199,6 @@ const exec = async (cronTask) => {
     throw new Error("openPrice is missing or not numeric in crypto-price response");
   }
   console.log("Start price (openPrice):", startPrice);
-  if (startPrice <= 1000) return;
 
   // 3) Fetch current BTC price from Pyth Hermes
   const pythRes = await fetch(PYTH_HERMES_URL);
@@ -216,6 +216,15 @@ const exec = async (cronTask) => {
   }
   const currentPrice = raw * Math.pow(10, expo); // actual BTC/USD price
   console.log("Current BTC price (Pyth):", currentPrice);
+  const relDiff = Math.abs(currentPrice - startPrice) / startPrice;
+
+  if (relDiff > MAX_REL_DIFF) {
+    console.log(
+      "Price sanity check FAILED. Possible bad data.",
+      { startPrice, currentPrice, relDiff }
+    );
+    return; // stop this iteration
+  }
 
   // 4) Compute probability that end price >= start price (Up)
   // Simple Brownian model: delta ~ N(0, sigma^2 * t)
@@ -448,5 +457,5 @@ const exec = async (cronTask) => {
 let task = cron.schedule(`*/${interval} * * * * *`, async () => {
   console.log("\n\n\n=======================")
   console.log('🥵🥵 running poly bids');
-  exec(task);
+  exec();
 });
