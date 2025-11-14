@@ -198,6 +198,7 @@ const exec = async (cronTask) => {
     throw new Error("openPrice is missing or not numeric in crypto-price response");
   }
   console.log("Start price (openPrice):", startPrice);
+  if (startPrice <= 1000) return;
 
   // 3) Fetch current BTC price from Pyth Hermes
   const pythRes = await fetch(PYTH_HERMES_URL);
@@ -233,7 +234,7 @@ const exec = async (cronTask) => {
   console.log("Model P(Down):", pDown.toFixed(4));
   console.log('\n');
 
-  if (Math.abs(z) < 2.5 && minsLeft.toFixed(3) > MINUTES_LEFT) {
+  if ((Math.abs(z) < 2.5 || Math.abs(z) > 5) && minsLeft.toFixed(3) > MINUTES_LEFT) {
     console.log(`Longer than ${MINUTES_LEFT} minutes left. No trade yet.`);
     return;
   } else {
