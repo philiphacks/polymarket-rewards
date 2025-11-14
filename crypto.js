@@ -102,30 +102,6 @@ function normCdf(z) {
   return p;
 }
 
-function ensureCsvHeader(path) {
-  if (!fs.existsSync(path)) {
-    fs.writeFileSync(
-      path,
-      [
-        "timestamp",
-        "slug",
-        "minutes_left",
-        "start_price",
-        "current_price",
-        "sigma_per_min",
-        "z",
-        "p_up",
-        "bid_up",
-        "ask_up",
-        "mid_up",
-        "ev_buy_up",
-        "ev_short_up",
-      ].join(",") + "\n",
-      "utf8"
-    );
-  }
-}
-
 function getBestBidAsk(ob) {
   let bestBid = null;
   let bestAsk = null;
@@ -318,41 +294,6 @@ const exec = async () => {
       3
     )}, EV=${best.ev.toFixed(4)}`
   );
-
-  ////////////////////////////
-  // Logging for backtesting
-  // ensureCsvHeader(LOG_FILE);
-  // const line = [
-  //   new Date().toISOString(),
-  //   SLUG,
-  //   minsLeft.toFixed(3),
-  //   startPrice,
-  //   currentPrice,
-  //   SIGMA_PER_MIN,
-  //   z.toFixed(6),
-  //   pUp.toFixed(6),
-  //   bid != null ? bid.toFixed(6) : "",
-  //   ask != null ? ask.toFixed(6) : "",
-  //   mid.toFixed(6),
-  //   evBuyUp != null ? evBuyUp.toFixed(6) : "",
-  //   evShortUp != null ? evShortUp.toFixed(6) : "",
-  // ].join(",");
-
-  // fs.appendFileSync(LOG_FILE, line + "\n", "utf8");
-  // console.log(`Appended line to ${LOG_FILE}`);
-  ////////////////////////////
-
-  // const edge = pUp - mid; // positive = your model thinks Up is underpriced
-
-  // console.log("Edge (model - market):", edge.toFixed(4));
-
-  // if (edge > MIN_EDGE) {
-  //   console.log(">>> SIGNAL: BUY UP (model > market by more than threshold)");
-  // } else if (-edge > MIN_EDGE) {
-  //   console.log(">>> SIGNAL: SELL/SHORT UP or BUY DOWN (model < market by more than threshold)");
-  // } else {
-  //   console.log(">>> No trade: edge too small");
-  // }
 };
 
 cron.schedule('*/5 * * * * *', () => {
