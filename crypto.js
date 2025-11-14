@@ -67,6 +67,14 @@ const PYTH_HERMES_URL =
 
 // CLOB host
 const CLOB_HOST = "https://clob.polymarket.com";
+const CHAIN_ID = 137;
+const SIGNATURE_TYPE = 1; // 0 = EVM/browser; 1 = Magic/email
+const FUNDER = '0xA69b1867a00c87928b5A1f6B1c2e9aC2246bD844';
+const signer = new Wallet(process.env.PRIVATE_KEY);
+const credsP = new ClobClient(CLOB_HOST, CHAIN_ID, signer).createOrDeriveApiKey();
+const creds = await credsP; // { key, secret, passphrase }
+console.log('Address:', await signer.getAddress());
+const client = new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, SIGNATURE_TYPE, FUNDER);
 
 // Vol model: your assumed BTC 1-minute std dev in USD
 // const SIGMA_PER_MIN = 105.30; // adjust based on your own stats
@@ -76,7 +84,8 @@ console.log('Loaded sigma per minute', SIGMA_PER_MIN);
 
 // How much edge (in probability points) you’d want vs market to consider betting
 const MIN_EDGE = 0.03; // 3%
-const MINUTES_LEFT = 3;
+const MINUTES_LEFT = 15;
+const Z_MIN = 0.5;
 
 // ---------- MATH HELPERS ----------
 
@@ -201,31 +210,45 @@ const exec = async () => {
 
   // Probability Up = P(End >= Start) ≈ Φ(z)
   const pUp = normCdf(z);
+  const pDown = 1 - pUp;
 
   console.log("z-score:", z.toFixed(3));
   console.log("Model P(Up):", pUp.toFixed(4));
+  console.log("Model P(Down):", pDown.toFixed(4));
 
   // 5) Read CLOB order book for Up token & compare
   const tokenIds = JSON.parse(market.clobTokenIds); // real field in your JSON
   const upTokenId = tokenIds[0]; // first outcome = "Up" (matches outcomes ["Up","Down"])
+  const downTokenId = tokenIds[1];
 
-  const client = new ClobClient(CLOB_HOST); // read-only
-  const upBook = await client.getOrderBook(upTokenId);
+  const [upBook, downBook] = await Promise.all([
+    client.getOrderBook(upTokenId),
+    client.getOrderBook(downTokenId),
+  ]);
   // console.log("Raw Up book snapshot:", JSON.stringify(upBook, null, 2));
+  // console.log("Raw Down book snapshot:", JSON.stringify(downBook, null, 2));
 
-  const { bestBid, bestAsk } = getBestBidAsk(upBook);
+  // const { bestBid, bestAsk } = getBestBidAsk(upBook);
 
-  if (bestBid == null || bestAsk == null) {
-    console.log("No bids/asks on Up side. No trade.");
+  // if (bestBid == null || bestAsk == null) {
+  //   console.log("No bids/asks on Up side. No trade.");
+  //   return;
+  // }
+  const { bestAsk: upAsk }   = getBestBidAsk(upBook);
+  const { bestAsk: downAsk } = getBestBidAsk(downBook);
+
+  if (upAsk == null && downAsk == null) {
+    console.log("No asks on either side. No trade.");
     return;
   }
 
-  console.log(bestBid, bestAsk);
-  const bid = bestBid;
-  const ask = bestAsk;
+  // const bid = bestBid;
+  // const ask = bestAsk;
+  const bid = upAsk;
+  const ask = downAsk;
   const mid = bid != null && ask != null ? (bid + ask) / 2 : bid ?? ask; // if one side missing
 
-  console.log(`Up bid/ask: ${bid.toFixed(3)} / ${ask.toFixed(3)}, mid≈${mid.toFixed(3)}`);
+  console.log(`Up bid/ask: ${bid?.toFixed(3)} / ${ask?.toFixed(3)}, mid≈${mid?.toFixed(3)}`);
 
   // CHANGED 2: edge based on EV vs ask/bid, NOT mid
   let evBuyUp = null;
@@ -245,14 +268,56 @@ const exec = async () => {
     console.log("No bid: cannot short Up.");
   }
 
-  // CHANGED 3: signal only if the corresponding side has liquidity AND EV > threshold
-  if (evBuyUp != null && evBuyUp > MIN_EDGE) {
-    console.log(">>> SIGNAL: BUY UP");
-  } else if (evShortUp != null && evShortUp > MIN_EDGE) {
-    console.log(">>> SIGNAL: SELL/SHORT UP (or BUY DOWN)");
+  // if (evBuyUp != null && evBuyUp > MIN_EDGE) {
+  //   console.log(">>> SIGNAL: BUY UP");
+  // } else if (evShortUp != null && evShortUp > MIN_EDGE) {
+  //   console.log(">>> SIGNAL: SELL/SHORT UP (or BUY DOWN)");
+  // } else {
+  //   console.log(">>> No trade: edge too small or missing liquidity");
+  // }
+
+  // Directional, buy-only logic
+  let candidates = [];
+
+  // Only consider BUY UP if z is clearly positive and we have an ask
+  console.log('UP ASK', z, Z_MIN, upAsk);
+  if (z >= Z_MIN && upAsk != null) {
+    const evBuyUp = pUp - upAsk;
+    console.log(
+      `Up ask=${upAsk.toFixed(3)}, EV buy Up (pUp - ask)= ${evBuyUp.toFixed(4)}`
+    );
+    candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
   } else {
-    console.log(">>> No trade: edge too small or missing liquidity");
+    console.log("We don't buy Up here (z too small or no ask).");
   }
+
+  // Only consider BUY DOWN if z is clearly negative and we have an ask
+  if (z <= -Z_MIN && downAsk != null) {
+    const evBuyDown = pDown - downAsk;
+    console.log(
+      `Down ask=${downAsk.toFixed(3)}, EV buy Down (pDown - ask)= ${evBuyDown.toFixed(4)}`
+    );
+    candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
+  } else {
+    console.log("We don't buy Down here (z too small in abs value or no ask).");
+  }
+
+  // Pick best positive-EV candidate (if any)
+  console.log(candidates);
+  candidates = candidates.filter((c) => c.ev > MIN_EDGE);
+
+  if (candidates.length === 0) {
+    console.log(">>> No trade: no side with enough edge in the right direction.");
+    return;
+  }
+
+  const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
+
+  console.log(
+    `>>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
+      3
+    )}, EV=${best.ev.toFixed(4)}`
+  );
 
   ////////////////////////////
   // Logging for backtesting
@@ -290,7 +355,7 @@ const exec = async () => {
   // }
 };
 
-cron.schedule('*/3 * * * * *', () => {
+cron.schedule('*/5 * * * * *', () => {
   console.log('\n\n\n🥵🥵 running poly bids');
   exec();
 });
