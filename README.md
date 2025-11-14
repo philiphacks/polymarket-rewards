@@ -13,3 +13,7 @@ Go to https://polymarket.com/rewards?onlyOpenOrders=true&id=earning_percentage&d
 
 https://x.com/Marko_Poly/status/1988353305785802863
 https://polymarket.com/@Halfapound?via=marko_poly
+
+## Deployed on DO Droplet
+
+`ssh root@178.62.213.122`

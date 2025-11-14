@@ -7,6 +7,7 @@ import fs from "fs";
 
 // ---------- CONFIG (EDIT THESE) ----------
 let interval = 5; // seconds
+let resetting = false;
 const MAX_REL_DIFF = 0.05; // 5%
 
 // Returns the unix timestamp (seconds) of the start of the current 15-min interval
@@ -142,6 +143,7 @@ function reset() {
     `gammaUrl=${GAMMA_URL}, ` +
     `sharesBought=${SHARES_BOUGHT}`
   );
+  resetting = false;
 }
 
 function buyShares() {
@@ -165,7 +167,9 @@ function sleep(ms) {
   });
 };
 
-const exec = async () => { 
+const exec = async () => {
+  if (resetting) return;
+
   // 1) Fetch market from Gamma (fields known from your JSON)
   const gammaRes = await fetch(GAMMA_URL);
   if (!gammaRes.ok) {
@@ -182,7 +186,8 @@ const exec = async () => {
   console.log("Minutes left:", minsLeft.toFixed(3));
 
   if (minsLeft < 0.01) {
-    await sleep(3000);
+    resetting = true;
+    await sleep(30 * 1000); // wait 30s
 
     console.log("Current interval is over. Resetting...");
     return reset();
@@ -243,7 +248,7 @@ const exec = async () => {
   console.log("Model P(Down):", pDown.toFixed(4));
   console.log('\n');
 
-  if ((Math.abs(z) < 2.5 || Math.abs(z) > 5) && minsLeft.toFixed(3) > MINUTES_LEFT) {
+  if ((Math.abs(z) < 1.7 || Math.abs(z) > 5) && minsLeft.toFixed(3) > MINUTES_LEFT) {
     console.log(`Longer than ${MINUTES_LEFT} minutes left. No trade yet.`);
     return;
   } else {
