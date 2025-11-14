@@ -8,7 +8,6 @@ import fs from "fs";
 // ---------- CONFIG (EDIT THESE) ----------
 let interval = 5; // seconds
 let resetting = false;
-const MAX_REL_DIFF = 0.05; // 5%
 
 // Returns the unix timestamp (seconds) of the start of the current 15-min interval
 function current15mStartUnix(date = new Date()) {
@@ -90,6 +89,8 @@ console.log('Loaded sigma per minute', SIGMA_PER_MIN);
 const MIN_EDGE = 0.03; // 3%
 const MINUTES_LEFT = 5;
 const Z_MIN = 0.5;
+const Z_MAX = 1.5; // if this Z value hits, we ignore time. we just go all in
+const MAX_REL_DIFF = 0.05; // 5%
 
 // ---------- MATH HELPERS ----------
 
@@ -248,7 +249,7 @@ const exec = async () => {
   console.log("Model P(Down):", pDown.toFixed(4));
   console.log('\n');
 
-  if ((Math.abs(z) < 1.5 || Math.abs(z) > 5) && minsLeft.toFixed(3) > MINUTES_LEFT) {
+  if ((Math.abs(z) < Z_MAX || Math.abs(z) > 5) && minsLeft.toFixed(3) > MINUTES_LEFT) {
     console.log(`Longer than ${MINUTES_LEFT} minutes left. No trade yet.`);
     return;
   } else {
@@ -343,7 +344,7 @@ const exec = async () => {
   // Pick best positive-EV candidate (if any)
   candidates = candidates.filter((c) => c.ev > MIN_EDGE);
 
-  if (Math.abs(z) > 1.5 || (minsLeft < 2 && minsLeft > 0.001)) {
+  if (Math.abs(z) > Z_MAX || (minsLeft < 2 && minsLeft > 0.001)) {
     const expiresAt = Math.floor(Date.now()/1000) + 15*60; // 15 minutes
     // --- dynamic price & size based on time left (2 minutes window) ---
     const windowSecs = 120;                          // 2 minutes
