@@ -280,9 +280,9 @@ const exec = async () => {
   // const ask = bestAsk;
   const bid = upAsk;
   const ask = downAsk;
-  const mid = bid != null && ask != null ? (bid + ask) / 2 : bid ?? ask; // if one side missing
+  const mid = upAsk != null && downAsk != null ? (upAsk + downAsk) / 2 : upAsk ?? downAsk; // if one side missing
 
-  console.log(`Up bid/ask: ${bid?.toFixed(3)} / ${ask?.toFixed(3)}, mid≈${mid?.toFixed(3)}`);
+  console.log(`Up ask/Down ask: ${upAsk?.toFixed(3)} / ${downAsk?.toFixed(3)}, mid≈${mid?.toFixed(3)}`);
 
   // CHANGED 2: edge based on EV vs ask/bid, NOT mid
   let evBuyUp = null;
@@ -384,7 +384,7 @@ const exec = async () => {
       `size=${orderSize}`
     );
 
-    if ((pUp >= 0.85 || secsLeft < 7) && z > 0) {
+    if ((pUp >= 0.85 || secsLeft < 7) && z > 0.15) {
       if (SHARES_BOUGHT <= 500) {
         console.log('>>> Not much time left. Buying UP with high probability.');
         const resp = await client.createAndPostOrder(
@@ -404,7 +404,7 @@ const exec = async () => {
       }
     }
 
-    if ((pDown >= 0.85 || secsLeft < 7) && z < 0) {
+    if ((pDown >= 0.85 || secsLeft < 7) && z < 0.15) {
       if (SHARES_BOUGHT <= 500) {
         console.log('>>> Not much time left. Buying DOWN with high probability.');
         const resp = await client.createAndPostOrder(
