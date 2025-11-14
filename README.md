@@ -2,12 +2,19 @@
 
 ## Main Strategy
 
+### Main.js:
 The main strategy farms the /rewards page and adds YES & NO bids within the midpoint range at the most conservative spread.
 
 Hedging has to be done manually, e.g. if you get filled on a YES for X shares, you have to calculate the Y share amount for NO to buy (in order to hedge).
 
-Currently makes ~$15/day. Not great, but low effort.
 Go to https://polymarket.com/rewards?onlyOpenOrders=true&id=earning_percentage&desc=true&q= to see earnings.
+
+NOTE: THIS STRATEGY LOSES MONEY
+
+### Crypto.js:
+
+Very opportunistically posts bids to buy UP/DOWN on 15-min crypto markets (only on Bitcoin 15-min atm).
+
 
 ## Tweets & Interesting Links
 
