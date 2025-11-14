@@ -436,14 +436,13 @@ const exec = async () => {
   }
 
   const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
-
-  console.log(
-    `>>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
-      3
-    )}, EV=${best.ev.toFixed(4)}`
-  );
-
   if (SHARES_BOUGHT <= 500) {
+    console.log(
+      `>>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
+        3
+      )}, EV=${best.ev.toFixed(4)}`
+    );
+
     const expiresAt = Math.floor(Date.now()/1000) + 15*60; // 15 minutes
     const resp = await client.createAndPostOrder(
       {
