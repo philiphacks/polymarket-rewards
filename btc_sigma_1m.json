@@ -1,7 +1,7 @@
 {
   "symbol": "BTC/USD",
-  "hoursBack": 0.25,
-  "sigmaPerMinUSD": 104.6313188506424,
-  "updatedAt": "2025-11-14T13:49:58.352Z",
-  "bars": 15
+  "hoursBack": 2,
+  "sigmaPerMinUSD": 111.66167965835848,
+  "updatedAt": "2025-11-14T14:13:20.379Z",
+  "bars": 120
 }

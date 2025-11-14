@@ -9,9 +9,9 @@ const BENCHMARKS_BASE = "https://benchmarks.pyth.network/v1/shims/tradingview";
 // *you must verify* it in /symbols from the same API.
 const SYMBOL = "Crypto.BTC/USD";
 
+const HOURS_BACK = 2;
 // 15 mins of 1-minute bars
-// const HOURS_BACK = 2;
-const HOURS_BACK = 0.25;
+// const HOURS_BACK = 0.25;
 const RESOLUTION = "1"; // 1-minute bars (check this in docs)
 
 // ---------- MATH: std dev of 1m price changes ----------

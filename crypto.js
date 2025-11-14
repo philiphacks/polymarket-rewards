@@ -176,7 +176,7 @@ const exec = async (cronTask) => {
     await sleep(3000);
 
     console.log("Current interval is over. Resetting...");
-    reset();
+    return reset();
   }
 
   // 2) Fetch start price (openPrice) from Polymarket crypto-price API
@@ -367,35 +367,43 @@ const exec = async (cronTask) => {
     );
 
     if ((pUp >= 0.85 || secsLeft < 7) && z > 0) {
-      console.log('>>> Not much time left. Buying UP with high probability.');
-      const resp = await client.createAndPostOrder(
-        {
-          tokenID: upTokenId,
-          price: limitPrice,
-          side: Side.BUY,
-          size: orderSize,
-          expiration: String(expiresAt),
-        },
-        { tickSize: "0.01", negRisk: false },
-        OrderType.GTD
-      );
-      console.log("UP GTD:", resp);
+      if (SHARES_BOUGHT <= 500) {
+        console.log('>>> Not much time left. Buying UP with high probability.');
+        const resp = await client.createAndPostOrder(
+          {
+            tokenID: upTokenId,
+            price: limitPrice,
+            side: Side.BUY,
+            size: orderSize,
+            expiration: String(expiresAt),
+          },
+          { tickSize: "0.01", negRisk: false },
+          OrderType.GTD
+        );
+        console.log("UP GTD:", resp);
+
+        SHARES_BOUGHT += orderSize;
+      }
     }
 
     if ((pDown >= 0.85 || secsLeft < 7) && z < 0) {
-      console.log('>>> Not much time left. Buying DOWN with high probability.');
-      const resp = await client.createAndPostOrder(
-        {
-          tokenID: downTokenId,
-          price: limitPrice,
-          side: Side.BUY,
-          size: orderSize,
-          expiration: String(expiresAt),
-        },
-        { tickSize: "0.01", negRisk: false },
-        OrderType.GTD
-      );
-      console.log("DOWN GTD:", resp);
+      if (SHARES_BOUGHT <= 500) {
+        console.log('>>> Not much time left. Buying DOWN with high probability.');
+        const resp = await client.createAndPostOrder(
+          {
+            tokenID: downTokenId,
+            price: limitPrice,
+            side: Side.BUY,
+            size: orderSize,
+            expiration: String(expiresAt),
+          },
+          { tickSize: "0.01", negRisk: false },
+          OrderType.GTD
+        );
+        console.log("DOWN GTD:", resp);
+
+        SHARES_BOUGHT += orderSize;
+      }
     }
   }
   if (candidates.length === 0) {
