@@ -17,3 +17,11 @@ https://polymarket.com/@Halfapound?via=marko_poly
 ## Deployed on DO Droplet
 
 `ssh root@178.62.213.122`
+
+Run with
+`pm2 start index.js --name polymarket-bot`
+
+Stop
+`pm2 stop polymarket-bot`
+
+or if that doesn't work use `pm2 list` and use `pm2 stop <ID>`.
