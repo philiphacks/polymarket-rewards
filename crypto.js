@@ -445,6 +445,7 @@ const exec = async (cronTask) => {
 };
 
 let task = cron.schedule(`*/${interval} * * * * *`, async () => {
-  console.log('\n\n\n🥵🥵 running poly bids');
+  console.log("\n\n\n=======================")
+  console.log('🥵🥵 running poly bids');
   exec(task);
 });
