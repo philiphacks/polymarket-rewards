@@ -133,6 +133,14 @@ function reset() {
   SLUG = btc15mSlug();
   GAMMA_URL = `https://gamma-api.polymarket.com/markets/slug/${SLUG}`;
   SHARES_BOUGHT = 0;
+
+  console.log(
+    `Reset script to new values: ` +
+    `cryptoPriceURL=${CRYPTO_PRICE_URL}, ` +
+    `slug=${SLUG}, ` +
+    `gammaUrl=${GAMMA_URL}, ` +
+    `sharesBought=${SHARES_BOUGHT}`
+  );
 }
 
 function buyShares() {
@@ -225,7 +233,7 @@ const exec = async (cronTask) => {
   console.log("Model P(Down):", pDown.toFixed(4));
   console.log('\n');
 
-  if (minsLeft.toFixed(3) > MINUTES_LEFT) {
+  if (Math.abs(z) < 2.5 && minsLeft.toFixed(3) > MINUTES_LEFT) {
     console.log(`Longer than ${MINUTES_LEFT} minutes left. No trade yet.`);
     return;
   } else {
@@ -342,7 +350,7 @@ const exec = async (cronTask) => {
     // When z is large → base/max prices closer to 0.97/0.99
     const basePriceLow  = 0.95;
     const basePriceHigh = 0.99;
-    const maxPriceLow   = 0.99;
+    const maxPriceLow   = 0.96;
     const maxPriceHigh  = 0.99;
 
     const basePrice =
