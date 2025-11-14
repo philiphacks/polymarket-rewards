@@ -174,7 +174,17 @@ function getSigmaPerMinUSD(volKey) {
   if (typeof sigmaConfig.sigmaPerMinUSD === "number") {
     return sigmaConfig.sigmaPerMinUSD;
   }
-  return 105.3; // default fallback
+
+  // default fallback
+  if (volKey === "BTC") {
+    return 105.3;
+  } else if (volKey === "SOL") {
+    return 0.2;
+  } else if (volKey === "ETH") {
+    return 4;
+  } else if (volKey === "XRP") {
+    return 0.003;
+  }
 }
 
 // ---------- PER-ASSET STATE ----------
