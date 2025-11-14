@@ -404,7 +404,7 @@ const exec = async () => {
       }
     }
 
-    if ((pDown >= 0.85 || secsLeft < 7) && z < 0.15) {
+    if ((pDown >= 0.85 || secsLeft < 7) && z < -0.15) {
       if (SHARES_BOUGHT <= 500) {
         console.log('>>> Not much time left. Buying DOWN with high probability.');
         const resp = await client.createAndPostOrder(
