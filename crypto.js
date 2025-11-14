@@ -56,9 +56,10 @@ function cryptoPriceUrl({
 }
 
 // Polymarket market slug (your BTC 15m up/down example)
-const SLUG = btc15mSlug();
-const GAMMA_URL = `https://gamma-api.polymarket.com/markets/slug/${SLUG}`;
-const CRYPTO_PRICE_URL = cryptoPriceUrl();
+let CRYPTO_PRICE_URL = cryptoPriceUrl();
+let SLUG = btc15mSlug();
+let SHARES_BOUGHT = 0;
+let GAMMA_URL = `https://gamma-api.polymarket.com/markets/slug/${SLUG}`;
 console.log(SLUG, CRYPTO_PRICE_URL);
 
 // Pyth Hermes latest price endpoint (BTC/USD feed id from Pyth docs)
@@ -127,7 +128,35 @@ function getBestBidAsk(ob) {
   };
 }
 
-const exec = async () => { 
+function reset() {
+  CRYPTO_PRICE_URL = cryptoPriceUrl();
+  SLUG = btc15mSlug();
+  GAMMA_URL = `https://gamma-api.polymarket.com/markets/slug/${SLUG}`;
+  SHARES_BOUGHT = 0;
+}
+
+function buyShares() {
+
+}
+
+function reschedule(newInterval) {
+  // if (newInterval === interval) return;
+
+  // interval = newInterval;
+  // task.stop();
+  // task = cron.schedule(`*/${interval} * * * * *`, async () => {
+  //   console.log('\n\n\n🥵🥵 running poly bids');
+  //   exec(task);
+  // });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+};
+
+const exec = async (cronTask) => { 
   // 1) Fetch market from Gamma (fields known from your JSON)
   const gammaRes = await fetch(GAMMA_URL);
   if (!gammaRes.ok) {
@@ -143,9 +172,11 @@ const exec = async () => {
   console.log("End date:", market.endDate);
   console.log("Minutes left:", minsLeft.toFixed(3));
 
-  if (minsLeft.toFixed(3) > MINUTES_LEFT) {
-    console.log(`Longer than ${MINUTES_LEFT} minutes left. No trade yet.`);
-    return;
+  if (minsLeft < 0.01) {
+    await sleep(3000);
+
+    console.log("Current interval is over. Resetting...");
+    reset();
   }
 
   // 2) Fetch start price (openPrice) from Polymarket crypto-price API
@@ -193,6 +224,13 @@ const exec = async () => {
   console.log("Model P(Up):", pUp.toFixed(4));
   console.log("Model P(Down):", pDown.toFixed(4));
   console.log('\n');
+
+  if (minsLeft.toFixed(3) > MINUTES_LEFT) {
+    console.log(`Longer than ${MINUTES_LEFT} minutes left. No trade yet.`);
+    return;
+  } else {
+    reschedule(5);
+  }
 
   // 5) Read CLOB order book for Up token & compare
   const tokenIds = JSON.parse(market.clobTokenIds); // real field in your JSON
@@ -282,7 +320,7 @@ const exec = async () => {
   // Pick best positive-EV candidate (if any)
   candidates = candidates.filter((c) => c.ev > MIN_EDGE);
 
-  if (minsLeft < 1.5 && minsLeft > 0.001) {
+  if (minsLeft < 2 && minsLeft > 0.001) {
     const expiresAt = Math.floor(Date.now()/1000) + 15*60; // 15 minutes
     // --- dynamic price & size based on time left (2 minutes window) ---
     const windowSecs = 120;                          // 2 minutes
@@ -312,8 +350,8 @@ const exec = async () => {
     const maxPrice =
       maxPriceLow + (maxPriceHigh - maxPriceLow) * zFrac;
 
-    const baseSize  = 50;
-    const maxSize   = 500;
+    const baseSize  = 25;
+    const maxSize   = 100;
 
     const priceStep = (maxPrice - basePrice) / (LEVELS - 1);
     const sizeStep  = (maxSize  - baseSize)  / (LEVELS - 1);
@@ -328,7 +366,7 @@ const exec = async () => {
       `size=${orderSize}`
     );
 
-    if (pUp >= 0.85 && z > 0) {
+    if ((pUp >= 0.85 || secsLeft < 7) && z > 0) {
       console.log('>>> Not much time left. Buying UP with high probability.');
       const resp = await client.createAndPostOrder(
         {
@@ -344,7 +382,7 @@ const exec = async () => {
       console.log("UP GTD:", resp);
     }
 
-    if (pDown >= 0.85 && z < 0) {
+    if ((pDown >= 0.85 || secsLeft < 7) && z < 0) {
       console.log('>>> Not much time left. Buying DOWN with high probability.');
       const resp = await client.createAndPostOrder(
         {
@@ -373,26 +411,24 @@ const exec = async () => {
     )}, EV=${best.ev.toFixed(4)}`
   );
 
-  const expiresAt = Math.floor(Date.now()/1000) + 15*60; // 15 minutes
-  const resp = await client.createAndPostOrder(
-    {
-      tokenID: best.side === 'UP' ? upTokenId : downTokenId,
-      price: best.ask.toFixed(2),
-      side: Side.BUY,
-      size: 100,
-      expiration: String(expiresAt),
-    },
-    { tickSize: "0.01", negRisk: false },
-    OrderType.GTD
-  );
+  if (SHARES_BOUGHT <= 500) {
+    const expiresAt = Math.floor(Date.now()/1000) + 15*60; // 15 minutes
+    const resp = await client.createAndPostOrder(
+      {
+        tokenID: best.side === 'UP' ? upTokenId : downTokenId,
+        price: best.ask.toFixed(2),
+        side: Side.BUY,
+        size: 100,
+        expiration: String(expiresAt),
+      },
+      { tickSize: "0.01", negRisk: false },
+      OrderType.GTD
+    );
+    SHARES_BOUGHT += 100;
+  }
 };
 
-const task = cron.schedule(`*/${interval} * * * * *`, async () => {
+let task = cron.schedule(`*/${interval} * * * * *`, async () => {
   console.log('\n\n\n🥵🥵 running poly bids');
-  exec();
-
-  // if (newInterval !== interval) {
-  //   interval = newInterval;
-  //   task.setTime(`*/${interval} * * * * *`); // update schedule
-  // }
+  exec(task);
 });
