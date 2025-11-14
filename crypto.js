@@ -38,7 +38,12 @@ const ASSETS = [
 ];
 
 // Max shares per 15m market *per asset*
-const MAX_SHARES_PER_MARKET = 500;
+const MAX_SHARES_PER_MARKET = {
+  BTC: 500,
+  ETH: 400,
+  SOL: 400,
+  XRP: 200,
+};
 
 // Time / z thresholds & sanity checks
 const MIN_EDGE = 0.03;     // 3% EV threshold
@@ -177,7 +182,7 @@ function getSigmaPerMinUSD(volKey) {
 
   // default fallback
   if (volKey === "BTC") {
-    return 105.3;
+    return 90;
   } else if (volKey === "SOL") {
     return 0.2;
   } else if (volKey === "ETH") {
@@ -217,6 +222,10 @@ function ensureState(asset) {
   return stateBySymbol[asset.symbol];
 }
 
+function getMaxSharesForMarket(volKey) {
+  return MAX_SHARES_PER_MARKET[volKey] || 500;
+}
+
 // ---------- CORE EXECUTION PER ASSET ----------
 async function execForAsset(asset) {
   const state = ensureState(asset);
@@ -254,6 +263,7 @@ async function execForAsset(asset) {
   }
 
   // 2) Fetch start price (openPrice) from Polymarket crypto-price API
+  console.log('fetching crapto url', cryptoPriceUrl);
   const cpRes = await fetch(cryptoPriceUrl);
   if (!cpRes.ok) {
     console.log(
@@ -304,7 +314,8 @@ async function execForAsset(asset) {
   }
 
   // 4) Compute probability Up using per-asset σ
-  const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.volKey);
+  const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
+  console.log(`[${asset.symbol}] Got σ ${SIGMA_PER_MIN} (1 stdev)`);
   const sigmaT = SIGMA_PER_MIN * Math.sqrt(minsLeft);
   const diff = currentPrice - startPrice;
   const z = diff / sigmaT;
@@ -431,7 +442,7 @@ async function execForAsset(asset) {
 
     // UP side
     if ((pUp >= 0.85 || secsLeft < 7) && z > 0.15) {
-      if (slugShares + orderSize <= MAX_SHARES_PER_MARKET) {
+      if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
         console.log(
           `[${asset.symbol}] Late game: BUY UP (high probability / very late)`
         );
@@ -450,14 +461,14 @@ async function execForAsset(asset) {
         state.sharesBoughtBySlug[slug] = slugShares + orderSize;
       } else {
         console.log(
-          `[${asset.symbol}] Skipping UP late buy; would exceed ${MAX_SHARES_PER_MARKET} shares`
+          `[${asset.symbol}] Skipping UP late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
         );
       }
     }
 
     // DOWN side
     if ((pDown >= 0.85 || secsLeft < 7) && z < -0.15) {
-      if (slugShares + orderSize <= MAX_SHARES_PER_MARKET) {
+      if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
         console.log(
           `[${asset.symbol}] Late game: BUY DOWN (high probability / very late)`
         );
@@ -477,7 +488,7 @@ async function execForAsset(asset) {
           (state.sharesBoughtBySlug[slug] || 0) + orderSize;
       } else {
         console.log(
-          `[${asset.symbol}] Skipping DOWN late buy; would exceed ${MAX_SHARES_PER_MARKET} shares`
+          `[${asset.symbol}] Skipping DOWN late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
         );
       }
     }
@@ -495,9 +506,9 @@ async function execForAsset(asset) {
   const currentShares = state.sharesBoughtBySlug[slug] || 0;
   const size = 100;
 
-  if (currentShares + size > MAX_SHARES_PER_MARKET) {
+  if (currentShares + size > getMaxSharesForMarket(asset.symbol)) {
     console.log(
-      `[${asset.symbol}] Skipping EV buy; would exceed ${MAX_SHARES_PER_MARKET} shares`
+      `[${asset.symbol}] Skipping EV buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
     );
     return;
   }
