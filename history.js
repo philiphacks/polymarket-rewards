@@ -1,18 +1,23 @@
-// btc_vol_1m.js
-// Computes BTC 1-minute std dev (USD) over last 8 hours using Pyth Benchmarks.
+// vol_1m_multi.js
+// Computes 1-minute std dev (USD) over last N hours for BTC, ETH, SOL, XRP using Pyth Benchmarks.
 import fs from "fs";
 
 // ---------- CONFIG ----------
 const BENCHMARKS_BASE = "https://benchmarks.pyth.network/v1/shims/tradingview";
 
-// NOTE: This symbol string is common in Pyth examples, but
-// *you must verify* it in /symbols from the same API.
-const SYMBOL = "Crypto.BTC/USD";
+// Asset list: key = your label, tvSymbol = Pyth TradingView symbol string
+const ASSETS = [
+  { key: "BTC", tvSymbol: "Crypto.BTC/USD" },
+  { key: "ETH", tvSymbol: "Crypto.ETH/USD" },
+  { key: "SOL", tvSymbol: "Crypto.SOL/USD" },
+  { key: "XRP", tvSymbol: "Crypto.XRP/USD" },
+];
 
-const HOURS_BACK = 2;
-// 15 mins of 1-minute bars
-// const HOURS_BACK = 0.25;
-const RESOLUTION = "1"; // 1-minute bars (check this in docs)
+const HOURS_BACK = 2;   // lookback window
+const RESOLUTION = "1"; // 1-minute bars
+
+// Output file (same as before)
+const OUT_FILE = "btc_sigma_1m.json";
 
 // ---------- MATH: std dev of 1m price changes ----------
 function stdDev(arr) {
@@ -23,90 +28,113 @@ function stdDev(arr) {
   return Math.sqrt(variance);
 }
 
-// ---------- FETCH 1-MIN BARS (ASSUMED TRADINGVIEW FORMAT) ----------
-async function fetchOneMinuteCloses() {
+// ---------- FETCH 1-MIN BARS FOR A GIVEN SYMBOL ----------
+async function fetchOneMinuteCloses(tvSymbol) {
   const nowSec = Math.floor(Date.now() / 1000);
   const fromSec = nowSec - HOURS_BACK * 60 * 60;
 
-  // ⚠️ ASSUMPTION:
-  // Pyth’s TradingView shim follows the standard TradingView UDF history API:
-  //   GET /history?symbol=...&resolution=...&from=...&to=...
-  // You MUST confirm these parameter names in:
-  //   https://benchmarks.pyth.network/redoc
-  // section: "History: https://benchmarks.pyth.network/v1/shims/tradingview/history"
   const params = new URLSearchParams({
-    symbol: SYMBOL,
+    symbol: tvSymbol,
     resolution: RESOLUTION,
     from: String(fromSec),
     to: String(nowSec),
   });
 
   const url = `${BENCHMARKS_BASE}/history?${params.toString()}`;
-  console.log("History URL:", url);
+  console.log(`History URL for ${tvSymbol}:`, url);
 
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`History request failed: ${res.status} ${res.statusText}`);
+    throw new Error(
+      `History request failed for ${tvSymbol}: ${res.status} ${res.statusText}`
+    );
   }
   const data = await res.json();
-  // console.log(data); // inspect once to see the exact format
 
-  // ⚠️ ASSUMPTION:
-  // Standard TradingView /history returns something like:
-  // {
-  //   s: "ok",
-  //   t: [timestamps...],
-  //   c: [closePrices...],
-  //   o: [...], h: [...], l: [...]
-  // }
-  // You MUST verify that `data.c` exists and is numeric array.
+  // Expect TradingView-style payload: { s: "ok", c: [closes...], ... }
   if (data.s !== "ok") {
-    throw new Error(`History response not ok: ${data.s}`);
+    throw new Error(`History response not ok for ${tvSymbol}: ${data.s}`);
   }
   if (!Array.isArray(data.c) || data.c.length < 2) {
-    throw new Error("Not enough close prices in history response");
+    throw new Error(
+      `Not enough close prices in history response for ${tvSymbol}`
+    );
   }
 
-  // Ensure they're numbers
   const closes = data.c.map((x) => Number(x));
   return closes;
+}
+
+// ---------- PER-ASSET COMPUTE ----------
+async function computeSigmaForAsset(asset) {
+  const { key, tvSymbol } = asset;
+  const closes = await fetchOneMinuteCloses(tvSymbol);
+
+  const deltas = [];
+  for (let i = 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (Number.isFinite(d)) deltas.push(d);
+  }
+
+  if (deltas.length === 0) {
+    throw new Error(`No valid deltas for ${tvSymbol}, cannot compute std dev.`);
+  }
+
+  const sigmaPerMinUSD = stdDev(deltas);
+
+  console.log(
+    `${key}: bars=${closes.length}, deltas=${deltas.length}, ` +
+      `σ₁min≈${sigmaPerMinUSD.toFixed(4)} USD`
+  );
+
+  return {
+    key,
+    tvSymbol,
+    sigmaPerMinUSD,
+    bars: closes.length,
+  };
 }
 
 // ---------- MAIN ----------
 (async () => {
   try {
-    const closes = await fetchOneMinuteCloses();
+    const results = {};
 
-    // 1-minute price changes ΔS = S_t - S_{t-1}
-    const deltas = [];
-    for (let i = 1; i < closes.length; i++) {
-      const d = closes[i] - closes[i - 1];
-      if (Number.isFinite(d)) deltas.push(d);
+    // Compute sequentially (simple, friendlier to API)
+    for (const asset of ASSETS) {
+      try {
+        const res = await computeSigmaForAsset(asset);
+        results[asset.key] = {
+          symbol: res.tvSymbol,
+          sigmaPerMinUSD: res.sigmaPerMinUSD,
+          bars: res.bars,
+        };
+      } catch (err) {
+        console.error(`Error computing vol for ${asset.key}:`, err.message);
+      }
     }
 
-    if (deltas.length === 0) {
-      console.log("No valid deltas, cannot compute std dev.");
+    if (!results.BTC) {
+      console.error("BTC result missing, refusing to write file.");
       return;
     }
 
-    const sigmaPerMinUSD = stdDev(deltas);
-
-    console.log(`Bars fetched: ${closes.length}`);
-    console.log(`Deltas used:  ${deltas.length}`);
-    console.log(`BTC 1-min σ (USD) over last ${HOURS_BACK}h ≈ ${sigmaPerMinUSD.toFixed(4)} USD`);
-
-    // write to a JSON file for other scripts
     const out = {
-      symbol: "BTC/USD",
+      // Keep top-level fields for BTC to remain backward compatible
+      symbol: results.BTC.symbol,
       hoursBack: HOURS_BACK,
-      sigmaPerMinUSD,
+      sigmaPerMinUSD: results.BTC.sigmaPerMinUSD,
+      bars: results.BTC.bars,
+
       updatedAt: new Date().toISOString(),
-      bars: closes.length,
+
+      // New: per-asset map
+      assets: results,
     };
 
-    fs.writeFileSync("btc_sigma_1m.json", JSON.stringify(out, null, 2));
-    console.log("Saved vol info to btc_sigma_1m.json");
+    fs.writeFileSync(OUT_FILE, JSON.stringify(out, null, 2));
+    console.log(`Saved vol info for ${Object.keys(results).join(", ")} to ${OUT_FILE}`);
   } catch (err) {
-    console.error("Error computing BTC 1-min std dev:", err);
+    console.error("Error computing 1-min std devs:", err);
   }
 })();

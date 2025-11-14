@@ -248,7 +248,7 @@ const exec = async () => {
   console.log("Model P(Down):", pDown.toFixed(4));
   console.log('\n');
 
-  if ((Math.abs(z) < 1.7 || Math.abs(z) > 5) && minsLeft.toFixed(3) > MINUTES_LEFT) {
+  if ((Math.abs(z) < 1.5 || Math.abs(z) > 5) && minsLeft.toFixed(3) > MINUTES_LEFT) {
     console.log(`Longer than ${MINUTES_LEFT} minutes left. No trade yet.`);
     return;
   } else {
@@ -343,7 +343,7 @@ const exec = async () => {
   // Pick best positive-EV candidate (if any)
   candidates = candidates.filter((c) => c.ev > MIN_EDGE);
 
-  if (minsLeft < 2 && minsLeft > 0.001) {
+  if (Math.abs(z) > 1.5 || (minsLeft < 2 && minsLeft > 0.001)) {
     const expiresAt = Math.floor(Date.now()/1000) + 15*60; // 15 minutes
     // --- dynamic price & size based on time left (2 minutes window) ---
     const windowSecs = 120;                          // 2 minutes
