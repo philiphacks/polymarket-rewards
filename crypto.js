@@ -1,11 +1,12 @@
 import 'dotenv/config';
 import cron from "node-cron";
 import clob from "@polymarket/clob-client";
-const { ClobClient } = clob;
+const { ClobClient, Side, OrderType } = clob;
 import { Wallet } from "@ethersproject/wallet";
 import fs from "fs";
 
 // ---------- CONFIG (EDIT THESE) ----------
+let interval = 5; // seconds
 
 // Returns the unix timestamp (seconds) of the start of the current 15-min interval
 function current15mStartUnix(date = new Date()) {
@@ -84,7 +85,7 @@ console.log('Loaded sigma per minute', SIGMA_PER_MIN);
 
 // How much edge (in probability points) you’d want vs market to consider betting
 const MIN_EDGE = 0.03; // 3%
-const MINUTES_LEFT = 15;
+const MINUTES_LEFT = 5;
 const Z_MIN = 0.5;
 
 // ---------- MATH HELPERS ----------
@@ -149,9 +150,7 @@ const exec = async () => {
 
   // 2) Fetch start price (openPrice) from Polymarket crypto-price API
   const cpRes = await fetch(CRYPTO_PRICE_URL);
-  if (!cpRes.ok) {
-    throw new Error(`crypto-price request failed: ${cpRes.status} ${cpRes.statusText}`);
-  }
+  if (!cpRes.ok) return;
   const cp = await cpRes.json();
 
   // ASSUMPTION: openPrice is a top-level numeric field in this JSON
@@ -188,9 +187,12 @@ const exec = async () => {
   const pUp = normCdf(z);
   const pDown = 1 - pUp;
 
+  console.log('\n');
+  console.log("min z-score:", Z_MIN.toFixed(3));
   console.log("z-score:", z.toFixed(3));
   console.log("Model P(Up):", pUp.toFixed(4));
   console.log("Model P(Down):", pDown.toFixed(4));
+  console.log('\n');
 
   // 5) Read CLOB order book for Up token & compare
   const tokenIds = JSON.parse(market.clobTokenIds); // real field in your JSON
@@ -256,7 +258,6 @@ const exec = async () => {
   let candidates = [];
 
   // Only consider BUY UP if z is clearly positive and we have an ask
-  console.log('UP ASK', z, Z_MIN, upAsk);
   if (z >= Z_MIN && upAsk != null) {
     const evBuyUp = pUp - upAsk;
     console.log(
@@ -279,9 +280,86 @@ const exec = async () => {
   }
 
   // Pick best positive-EV candidate (if any)
-  console.log(candidates);
   candidates = candidates.filter((c) => c.ev > MIN_EDGE);
 
+  if (minsLeft < 1.5 && minsLeft > 0.001) {
+    const expiresAt = Math.floor(Date.now()/1000) + 15*60; // 15 minutes
+    // --- dynamic price & size based on time left (2 minutes window) ---
+    const windowSecs = 120;                          // 2 minutes
+    const secsLeftRaw = minsLeft * 60;
+    const secsLeft = Math.max(0, Math.min(windowSecs, secsLeftRaw));
+
+    // progress goes from 0 (120s left) to 1 (0s left)
+    const progress = (windowSecs - secsLeft) / windowSecs;
+
+    const LEVELS = 5; // 5 steps of ~20 seconds
+    let level = Math.floor(progress * LEVELS); // 0..8
+    level = Math.min(LEVELS - 1, Math.max(0, level)); // clamp to 0..4
+
+    // ---------- NEW: make price aggressiveness depend on |z| ----------
+    const zAbs = Math.min(Math.abs(z), 3); // cap at 3σ
+    const zFrac = zAbs / 3;                // 0 (weak) .. 1 (very strong)
+
+    // When z is small → base/max prices closer to 0.95/0.97
+    // When z is large → base/max prices closer to 0.97/0.99
+    const basePriceLow  = 0.95;
+    const basePriceHigh = 0.99;
+    const maxPriceLow   = 0.99;
+    const maxPriceHigh  = 0.99;
+
+    const basePrice =
+      basePriceLow + (basePriceHigh - basePriceLow) * zFrac;
+    const maxPrice =
+      maxPriceLow + (maxPriceHigh - maxPriceLow) * zFrac;
+
+    const baseSize  = 50;
+    const maxSize   = 500;
+
+    const priceStep = (maxPrice - basePrice) / (LEVELS - 1);
+    const sizeStep  = (maxSize  - baseSize)  / (LEVELS - 1);
+
+    const limitPrice = Number((basePrice + priceStep * level).toFixed(2));
+    const orderSize  = Math.round(baseSize + sizeStep * level);
+
+    console.log(
+      `Late game mode: secsLeft=${secsLeft.toFixed(1)}, level=${level}, ` +
+      `|z|=${zAbs.toFixed(3)}, basePrice=${basePrice.toFixed(3)}, ` +
+      `maxPrice=${maxPrice.toFixed(3)}, limitPrice=${limitPrice}, ` +
+      `size=${orderSize}`
+    );
+
+    if (pUp >= 0.85 && z > 0) {
+      console.log('>>> Not much time left. Buying UP with high probability.');
+      const resp = await client.createAndPostOrder(
+        {
+          tokenID: upTokenId,
+          price: limitPrice,
+          side: Side.BUY,
+          size: orderSize,
+          expiration: String(expiresAt),
+        },
+        { tickSize: "0.01", negRisk: false },
+        OrderType.GTD
+      );
+      console.log("UP GTD:", resp);
+    }
+
+    if (pDown >= 0.85 && z < 0) {
+      console.log('>>> Not much time left. Buying DOWN with high probability.');
+      const resp = await client.createAndPostOrder(
+        {
+          tokenID: downTokenId,
+          price: limitPrice,
+          side: Side.BUY,
+          size: orderSize,
+          expiration: String(expiresAt),
+        },
+        { tickSize: "0.01", negRisk: false },
+        OrderType.GTD
+      );
+      console.log("DOWN GTD:", resp);
+    }
+  }
   if (candidates.length === 0) {
     console.log(">>> No trade: no side with enough edge in the right direction.");
     return;
@@ -294,9 +372,27 @@ const exec = async () => {
       3
     )}, EV=${best.ev.toFixed(4)}`
   );
+
+  const expiresAt = Math.floor(Date.now()/1000) + 15*60; // 15 minutes
+  const resp = await client.createAndPostOrder(
+    {
+      tokenID: best.side === 'UP' ? upTokenId : downTokenId,
+      price: best.ask.toFixed(2),
+      side: Side.BUY,
+      size: 100,
+      expiration: String(expiresAt),
+    },
+    { tickSize: "0.01", negRisk: false },
+    OrderType.GTD
+  );
 };
 
-cron.schedule('*/5 * * * * *', () => {
+const task = cron.schedule(`*/${interval} * * * * *`, async () => {
   console.log('\n\n\n🥵🥵 running poly bids');
   exec();
+
+  // if (newInterval !== interval) {
+  //   interval = newInterval;
+  //   task.setTime(`*/${interval} * * * * *`); // update schedule
+  // }
 });
