@@ -538,43 +538,43 @@ async function execForAsset(asset) {
         `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}, EV=${evAtAsk.toFixed(4)}`
       );
 
-      if (evAtAsk <= lateMinEdge) {
+      // if (evAtAsk <= lateMinEdge) {
+      //   console.log(
+      //     `[${asset.symbol}] Late game: EV at ask not good enough (<= ${lateMinEdge}). Skipping.`
+      //   );
+      // } else {
+      const slugShares = state.sharesBoughtBySlug[slug] || 0;
+      const orderSize = 100;
+
+      if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
+        const limitPrice = Number(sideAsk.toFixed(2)); // cross current ask
+
         console.log(
-          `[${asset.symbol}] Late game: EV at ask not good enough (<= ${lateMinEdge}). Skipping.`
+          `[${asset.symbol}] Late game: BUY ${lateSide} @ ${limitPrice} ` +
+          `(ask), size=${orderSize}, EV=${evAtAsk.toFixed(4)}`
         );
+
+        const resp = await client.createAndPostOrder(
+          {
+            tokenID: lateSide === "UP" ? upTokenId : downTokenId,
+            price: limitPrice,
+            side: Side.BUY,
+            size: orderSize,
+            expiration: String(expiresAt),
+          },
+          { tickSize: "0.01", negRisk: false },
+          OrderType.GTD
+        );
+
+        console.log(`[${asset.symbol}] LATE ORDER RESP:`, resp);
+        state.sharesBoughtBySlug[slug] = slugShares + orderSize;
+        addPosition(state, slug, lateSide, orderSize);
       } else {
-        const slugShares = state.sharesBoughtBySlug[slug] || 0;
-        const orderSize = 100;
-
-        if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
-          const limitPrice = Number(sideAsk.toFixed(2)); // cross current ask
-
-          console.log(
-            `[${asset.symbol}] Late game: BUY ${lateSide} @ ${limitPrice} ` +
-            `(ask), size=${orderSize}, EV=${evAtAsk.toFixed(4)}`
-          );
-
-          const resp = await client.createAndPostOrder(
-            {
-              tokenID: lateSide === "UP" ? upTokenId : downTokenId,
-              price: limitPrice,
-              side: Side.BUY,
-              size: orderSize,
-              expiration: String(expiresAt),
-            },
-            { tickSize: "0.01", negRisk: false },
-            OrderType.GTD
-          );
-
-          console.log(`[${asset.symbol}] LATE ORDER RESP:`, resp);
-          state.sharesBoughtBySlug[slug] = slugShares + orderSize;
-          addPosition(state, slug, lateSide, orderSize);
-        } else {
-          console.log(
-            `[${asset.symbol}] Skipping late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
-          );
-        }
+        console.log(
+          `[${asset.symbol}] Skipping late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
+        );
       }
+      // }
     }
   }
 
