@@ -536,7 +536,7 @@ async function execForAsset(asset) {
     const slugShares = state.sharesBoughtBySlug[slug] || 0;
 
     // UP side
-    if ((pUp >= 0.85 || secsLeft < 7) && z > 0.15) {
+    if ((pUp >= 0.85 || (secsLeft < 7 && pUp >= 0.80)) && z > 0.15) {
       if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
         console.log(
           `[${asset.symbol}] Late game: BUY UP (high probability / very late)`
@@ -563,7 +563,7 @@ async function execForAsset(asset) {
     }
 
     // DOWN side
-    if ((pDown >= 0.85 || secsLeft < 7) && z < -0.15) {
+    if ((pDown >= 0.85 || (secsLeft < 7 && pDown >= 0.80)) && z < -0.15) {
       if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
         console.log(
           `[${asset.symbol}] Late game: BUY DOWN (high probability / very late)`
