@@ -49,7 +49,7 @@ const MAX_SHARES_PER_MARKET = {
 const MIN_EDGE = 0.03;     // 3% EV threshold
 const MINUTES_LEFT = 5;    // only act in last X minutes (unless |z| big)
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
-const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
+const Z_MAX = 1.9;         // if |z| >= this, ignore MINUTES_LEFT condition
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
 
 // CLOB / signing
