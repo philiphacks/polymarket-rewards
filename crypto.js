@@ -181,24 +181,30 @@ function sleep(ms) {
 function getSigmaPerMinUSD(volKey) {
   const assets = sigmaConfig.assets || {};
   const entry = assets[volKey];
-  if (entry && typeof entry.sigmaPerMinUSD === "number") {
-    return entry.sigmaPerMinUSD;
-  }
-  // Fallback to global sigmaPerMinUSD if present, else hardcoded default
-  if (typeof sigmaConfig.sigmaPerMinUSD === "number") {
-    return sigmaConfig.sigmaPerMinUSD;
+
+  // Per-asset floors = your previous defaults
+  let floor = null;
+  if (volKey === "BTC" || volKey === "BTC/USD") {
+    floor = 90;
+  } else if (volKey === "ETH" || volKey === "ETH/USD") {
+    floor = 4;
+  } else if (volKey === "SOL" || volKey === "SOL/USD") {
+    floor = 0.2;
+  } else if (volKey === "XRP" || volKey === "XRP/USD") {
+    floor = 0.003;
   }
 
-  // default fallback
-  if (volKey === "BTC") {
-    return 90;
-  } else if (volKey === "SOL") {
-    return 0.2;
-  } else if (volKey === "ETH") {
-    return 4;
-  } else if (volKey === "XRP") {
-    return 0.003;
+  // If we have a per-asset value in the JSON, use it but never below the floor.
+  if (entry && typeof entry.sigmaPerMinUSD === "number") {
+    const sigma = entry.sigmaPerMinUSD;
+    if (floor != null) {
+      return Math.max(sigma, floor);
+    }
+    return sigma;
   }
+
+  // No per-asset entry → just use the floor.
+  return floor;
 }
 
 // ---------- PER-ASSET STATE ----------
