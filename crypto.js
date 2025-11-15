@@ -46,7 +46,7 @@ const MAX_SHARES_PER_MARKET = {
 };
 
 // Time / z thresholds & sanity checks
-const MIN_EDGE = 0.04;     // 4% EV threshold
+const MIN_EDGE = 0.05;     // 5% EV threshold
 const MINUTES_LEFT = 3;    // only act in last X minutes (unless |z| big)
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
 const Z_MAX = 1.9;         // if |z| >= this, ignore MINUTES_LEFT condition
