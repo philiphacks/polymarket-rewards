@@ -46,8 +46,9 @@ const MAX_SHARES_PER_MARKET = {
 };
 
 // Time / z thresholds & sanity checks
-const MIN_EDGE = 0.05;     // 5% EV threshold
 const MINUTES_LEFT = 3;    // only act in last X minutes (unless |z| big)
+const MIN_EDGE_EARLY = 0.07;  // minsLeft > MINUTES_LEFT
+const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
 const Z_MAX = 1.9;         // if |z| >= this, ignore MINUTES_LEFT condition
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
@@ -456,7 +457,8 @@ async function execForAsset(asset) {
   }
 
   // Filter by EV threshold
-  candidates = candidates.filter((c) => c.ev > MIN_EDGE);
+  const minEdge = minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE;
+  candidates = candidates.filter((c) => c.ev > minEdge);
 
   // ---------- Late-game "all-in-ish" mode ----------
   if (Math.abs(z) > Z_MAX || (minsLeft < 2 && minsLeft > 0.001)) {
