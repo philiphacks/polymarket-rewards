@@ -26,9 +26,11 @@ https://polymarket.com/@Halfapound?via=marko_poly
 `ssh root@178.62.213.122`
 
 Run with
-`pm2 start index.js --name polymarket-bot`
+`pm2 start crypto.js --name polymarket-bot`
+`pm2 start history.js --name prices-bot`
 
 Stop
 `pm2 stop polymarket-bot`
+`pm2 stop prices-bot`
 
 or if that doesn't work use `pm2 list` and use `pm2 stop <ID>`.
