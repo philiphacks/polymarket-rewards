@@ -50,7 +50,11 @@ const MINUTES_LEFT = 3;    // only act in last X minutes (unless |z| big)
 const MIN_EDGE_EARLY = 0.07;  // minsLeft > MINUTES_LEFT
 const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
-const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
+// const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
+const Z_MAX_FAR_MINUTES = 10;
+const Z_MAX_NEAR_MINUTES = 2;
+const Z_MAX_FAR = 2.5;
+const Z_MAX_NEAR = 1.7;
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
 
 // CLOB / signing
@@ -146,6 +150,16 @@ function normCdf(z) {
       t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
   if (z > 0) p = 1 - p;
   return p;
+}
+
+function dynamicZMax(minsLeft) {
+  if (minsLeft >= Z_MAX_FAR_MINUTES) return Z_MAX_FAR;
+  if (minsLeft <= Z_MAX_NEAR_MINUTES) return Z_MAX_NEAR;
+
+  const t =
+    (Z_MAX_FAR_MINUTES - minsLeft) /
+    (Z_MAX_FAR_MINUTES - Z_MAX_NEAR_MINUTES);
+  return Z_MAX_FAR - t * (Z_MAX_FAR - Z_MAX_NEAR);
 }
 
 // Best bid/ask from order book
@@ -417,8 +431,13 @@ async function execForAsset(asset) {
   console.log(`[${asset.symbol}] Model P(Up):`, pUp.toFixed(4));
   console.log(`[${asset.symbol}] Model P(Down):`, pDown.toFixed(4));
 
+  const zMaxDynamic = dynamicZMax(minsLeft);
+  console.log(
+    `[${asset.symbol}] dynamic Z_MAX (minsLeft=${minsLeft.toFixed(2)}): ${zMaxDynamic.toFixed(3)}`
+  );
+
   // If |z| small AND still early → no trade
-  if ((Math.abs(z) < Z_MAX || Math.abs(z) > 5) && minsLeft > MINUTES_LEFT) {
+  if ((Math.abs(z) < zMaxDynamic || Math.abs(z) > 5) && minsLeft > MINUTES_LEFT) {
     console.log(
       `[${asset.symbol}] Earlier than ${MINUTES_LEFT} mins left and |z| not huge. No trade yet.`
     );
@@ -489,7 +508,7 @@ async function execForAsset(asset) {
   candidates = candidates.filter((c) => c.ev > minEdge);
 
   // ---------- Late-game "all-in-ish" mode ----------
-  if (Math.abs(z) > Z_MAX || (minsLeft < 2 && minsLeft > 0.001)) {
+  if (Math.abs(z) > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001)) {
     const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
 
     const windowSecs = 120; // 2 minutes
