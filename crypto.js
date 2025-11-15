@@ -49,7 +49,7 @@ const MAX_SHARES_PER_MARKET = {
 const MIN_EDGE = 0.03;     // 3% EV threshold
 const MINUTES_LEFT = 5;    // only act in last X minutes (unless |z| big)
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
-const Z_MAX = 1.5;         // if |z| >= this, ignore MINUTES_LEFT condition
+const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
 
 // CLOB / signing
@@ -207,6 +207,8 @@ function resetStateForAsset(asset) {
     gammaUrl,
     sharesBoughtBySlug: { [slug]: 0 }, // track per-market
     resetting: false,
+    cpData: null,
+    marketMeta: null,
   };
 
   console.log(
@@ -235,23 +237,42 @@ async function execForAsset(asset) {
 
   console.log(`\n\n===== ${asset.symbol} | slug=${slug} =====`);
 
-  // 1) Fetch market from Gamma
-  const gammaRes = await fetch(gammaUrl);
-  if (!gammaRes.ok) {
-    console.log(
-      `[${asset.symbol}] Gamma request failed: ${gammaRes.status} ${gammaRes.statusText}`
-    );
-    return;
-  }
-  const market = await gammaRes.json();
+  // 1) Fetch/cached market meta from Gamma
+  if (!state.marketMeta || state.marketMeta.slug !== slug) {
+    const gammaRes = await fetch(gammaUrl);
+    if (!gammaRes.ok) {
+      console.log(
+        `[${asset.symbol}] Gamma request failed: ${gammaRes.status} ${gammaRes.statusText}`
+      );
+      return;
+    }
+    const market = await gammaRes.json();
+    const endMs = new Date(market.endDate).getTime();
+    const tokenIds = JSON.parse(market.clobTokenIds);
 
-  const endMs = new Date(market.endDate).getTime();
+    state.marketMeta = {
+      id: market.id,
+      slug,
+      question: market.question,
+      endMs,
+      tokenIds,
+      endDate: market.endDate
+    };
+
+    console.log(
+      `[${asset.symbol}] Cached marketMeta for slug=${slug}, id=${market.id}`
+    );
+  }
+
+  const { question, endMs, endDate, tokenIds } = state.marketMeta;
   const nowMs = Date.now();
   const minsLeft = Math.max((endMs - nowMs) / 60000, 0.001);
 
-  console.log(`[${asset.symbol}] Question:`, market.question);
-  console.log(`[${asset.symbol}] End date:`, market.endDate);
+  console.log(`[${asset.symbol}] Question:`, question);
+  console.log(`[${asset.symbol}] End date:`, endDate);
   console.log(`[${asset.symbol}] Minutes left:`, minsLeft.toFixed(3));
+
+  if (minsLeft > 14) return;
 
   // If market basically over, wait a bit and reset to next 15m market
   if (minsLeft < 0.01) {
@@ -263,21 +284,58 @@ async function execForAsset(asset) {
   }
 
   // 2) Fetch start price (openPrice) from Polymarket crypto-price API
-  console.log('fetching crapto url', cryptoPriceUrl);
-  const cpRes = await fetch(cryptoPriceUrl);
-  if (!cpRes.ok) {
+  //    with simple per-asset-per-slug cache
+  let startPrice;
+
+  if (
+    state.cpData &&
+    Number.isFinite(Number(state.cpData.openPrice)) && 
+    Number(state.cpData.openPrice) > 0
+  ) {
+    startPrice = Number(state.cpData.openPrice);
     console.log(
-      `[${asset.symbol}] crypto-price failed: ${cpRes.status} ${cpRes.statusText}`
+      `[${asset.symbol}] Using CACHED start price (openPrice):`,
+      startPrice
     );
-    return;
+  } else {
+    console.log('fetching crapto url', cryptoPriceUrl);
+    const cpRes = await fetch(cryptoPriceUrl);
+
+    if (cpRes.status === 429) {
+      console.log(
+        `[${asset.symbol}] crypto-price 429 (rate limited). Sleeping 3s and skipping this tick.`
+      );
+      await sleep(3000);
+      return;
+    }
+
+    if (!cpRes.ok) {
+      console.log(
+        `[${asset.symbol}] crypto-price failed: ${cpRes.status} ${cpRes.statusText}`
+      );
+      return;
+    }
+    const cp = await cpRes.json();
+    const candidate = Number(cp.openPrice);
+
+    if (!Number.isFinite(candidate) || candidate <= 0) {
+      console.log(
+        `[${asset.symbol}] openPrice missing / non-numeric / non-positive (=${cp.openPrice}). Not caching; skipping this tick.`
+      );
+      return;
+    }
+
+    state.cpData = {
+      ...cp,
+      _cachedAt: Date.now(),
+    };
+
+    startPrice = candidate;
+    console.log(
+      `[${asset.symbol}] Start price (openPrice) fetched & cached:`,
+      startPrice
+    );
   }
-  const cp = await cpRes.json();
-  const startPrice = Number(cp.openPrice);
-  if (!Number.isFinite(startPrice)) {
-    console.log(`[${asset.symbol}] openPrice missing or non-numeric`);
-    return;
-  }
-  console.log(`[${asset.symbol}] Start price (openPrice):`, startPrice);
 
   // 3) Fetch current price from Pyth Hermes (per-asset feed ID)
   const pythUrl =
@@ -336,7 +394,6 @@ async function execForAsset(asset) {
   }
 
   // 5) Order books
-  const tokenIds = JSON.parse(market.clobTokenIds);
   const upTokenId = tokenIds[0];
   const downTokenId = tokenIds[1];
 
