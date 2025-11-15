@@ -202,6 +202,27 @@ function getSigmaPerMinUSD(volKey) {
   return sigma;
 }
 
+function getExistingSide(state, slug) {
+  const sidePos = state.sideSharesBySlug?.[slug];
+  if (!sidePos) return null;
+
+  const up = sidePos.UP || 0;
+  const down = sidePos.DOWN || 0;
+
+  if (up > down) return "UP";
+  if (down > up) return "DOWN";
+  return null; // roughly flat
+}
+
+// **NEW**: helper to bump side position after trade
+function addPosition(state, slug, side, size) {
+  if (!state.sideSharesBySlug[slug]) {
+    state.sideSharesBySlug[slug] = { UP: 0, DOWN: 0 };
+  }
+  state.sideSharesBySlug[slug][side] =
+    (state.sideSharesBySlug[slug][side] || 0) + size;
+}
+
 // ---------- PER-ASSET STATE ----------
 const stateBySymbol = {};
 
@@ -216,6 +237,7 @@ function resetStateForAsset(asset) {
     cryptoPriceUrl: cryptoUrl,
     gammaUrl,
     sharesBoughtBySlug: { [slug]: 0 }, // track per-market
+    sideSharesBySlug: { [slug]: { UP: 0, DOWN: 0 } },
     resetting: false,
     cpData: null,
     marketMeta: null,
@@ -428,6 +450,11 @@ async function execForAsset(asset) {
     )} / ${downAsk?.toFixed(3)}, mid≈${mid?.toFixed(3)}`
   );
 
+  const existingSide = getExistingSide(state, slug);
+  console.log(
+    `[${asset.symbol}] Existing net side: ${existingSide || "FLAT"}`
+  );
+
   // Directional buy-only logic (same as before)
   let candidates = [];
 
@@ -527,6 +554,7 @@ async function execForAsset(asset) {
         );
         console.log(`[${asset.symbol}] UP GTD:`, resp);
         state.sharesBoughtBySlug[slug] = slugShares + orderSize;
+        addPosition(state, slug, "UP", orderSize);
       } else {
         console.log(
           `[${asset.symbol}] Skipping UP late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
@@ -554,6 +582,7 @@ async function execForAsset(asset) {
         console.log(`[${asset.symbol}] DOWN GTD:`, resp);
         state.sharesBoughtBySlug[slug] =
           (state.sharesBoughtBySlug[slug] || 0) + orderSize;
+        addPosition(state, slug, "DOWN", orderSize);
       } else {
         console.log(
           `[${asset.symbol}] Skipping DOWN late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
@@ -602,6 +631,7 @@ async function execForAsset(asset) {
 
   console.log(`[${asset.symbol}] ORDER RESP:`, resp);
   state.sharesBoughtBySlug[slug] = currentShares + size;
+  addPosition(state, slug, best.side, size);
 }
 
 // ---------- MAIN SCHEDULER ----------
