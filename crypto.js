@@ -50,7 +50,7 @@ const MINUTES_LEFT = 3;    // only act in last X minutes (unless |z| big)
 const MIN_EDGE_EARLY = 0.07;  // minsLeft > MINUTES_LEFT
 const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
-const Z_MAX = 1.6;         // if |z| >= this, ignore MINUTES_LEFT condition
+const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
 
 // CLOB / signing
