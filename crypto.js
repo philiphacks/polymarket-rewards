@@ -42,7 +42,7 @@ const MAX_SHARES_PER_MARKET = {
   BTC: 500,
   ETH: 400,
   SOL: 400,
-  XRP: 200,
+  XRP: 400,
 };
 
 // Time / z thresholds & sanity checks
