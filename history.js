@@ -1,6 +1,7 @@
 // vol_1m_multi.js
 // Computes 1-minute std dev (USD) over last N hours for BTC, ETH, SOL, XRP using Pyth Benchmarks.
 import fs from "fs";
+import cron from "node-cron";
 
 // ---------- CONFIG ----------
 const BENCHMARKS_BASE = "https://benchmarks.pyth.network/v1/shims/tradingview";
@@ -96,7 +97,7 @@ async function computeSigmaForAsset(asset) {
 }
 
 // ---------- MAIN ----------
-(async () => {
+const exec = async () => {
   try {
     const results = {};
 
@@ -125,10 +126,7 @@ async function computeSigmaForAsset(asset) {
       hoursBack: HOURS_BACK,
       sigmaPerMinUSD: results.BTC.sigmaPerMinUSD,
       bars: results.BTC.bars,
-
       updatedAt: new Date().toISOString(),
-
-      // New: per-asset map
       assets: results,
     };
 
@@ -137,4 +135,9 @@ async function computeSigmaForAsset(asset) {
   } catch (err) {
     console.error("Error computing 1-min std devs:", err);
   }
-})();
+};
+
+exec();
+cron.schedule(`0 0 */4 * * *`, async () => {
+  exec();
+});
