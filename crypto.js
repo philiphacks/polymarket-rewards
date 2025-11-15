@@ -52,7 +52,7 @@ const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
 // const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
 const Z_MAX_FAR_MINUTES = 10;
-const Z_MAX_NEAR_MINUTES = 2;
+const Z_MAX_NEAR_MINUTES = 3;
 const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
@@ -511,101 +511,69 @@ async function execForAsset(asset) {
   if (Math.abs(z) > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001)) {
     const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
 
-    const windowSecs = 120; // 2 minutes
-    const secsLeftRaw = minsLeft * 60;
-    const secsLeft = Math.max(0, Math.min(windowSecs, secsLeftRaw));
-    const progress = (windowSecs - secsLeft) / windowSecs;
+    // choose side based on probabilities + z sign
+    let lateSide = null;
+    let sideProb = null;
+    let sideAsk = null;
 
-    const LEVELS = 5;
-    let level = Math.floor(progress * LEVELS);
-    level = Math.min(LEVELS - 1, Math.max(0, level));
-
-    const zAbs = Math.min(Math.abs(z), 3);
-    const zFrac = zAbs / 3;
-
-    const basePriceLow = 0.95;
-    const basePriceHigh = 0.99;
-    const maxPriceLow = 0.96;
-    const maxPriceHigh = 0.99;
-
-    const basePrice =
-      basePriceLow + (basePriceHigh - basePriceLow) * zFrac;
-    const maxPrice =
-      maxPriceLow + (maxPriceHigh - maxPriceLow) * zFrac;
-
-    const baseSize = 25;
-    const maxSize = 100;
-
-    const priceStep = (maxPrice - basePrice) / (LEVELS - 1);
-    const sizeStep = (maxSize - baseSize) / (LEVELS - 1);
-
-    const limitPrice = Number((basePrice + priceStep * level).toFixed(2));
-    const orderSize = Math.round(baseSize + sizeStep * level);
-
-    console.log(
-      `[${asset.symbol}] Late game: secsLeft=${secsLeft.toFixed(
-        1
-      )}, level=${level}, |z|=${zAbs.toFixed(
-        3
-      )}, basePrice=${basePrice.toFixed(3)}, maxPrice=${maxPrice.toFixed(
-        3
-      )}, limitPrice=${limitPrice}, size=${orderSize}`
-    );
-
-    const slugShares = state.sharesBoughtBySlug[slug] || 0;
-
-    // UP side
-    if ((pUp >= 0.85 || (secsLeft < 7 && pUp >= 0.80)) && z > Z_MIN) {
-      if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
-        console.log(
-          `[${asset.symbol}] Late game: BUY UP (high probability / very late)`
-        );
-        const resp = await client.createAndPostOrder(
-          {
-            tokenID: upTokenId,
-            price: limitPrice,
-            side: Side.BUY,
-            size: orderSize,
-            expiration: String(expiresAt),
-          },
-          { tickSize: "0.01", negRisk: false },
-          OrderType.GTD
-        );
-        console.log(`[${asset.symbol}] UP GTD:`, resp);
-        state.sharesBoughtBySlug[slug] = slugShares + orderSize;
-        addPosition(state, slug, "UP", orderSize);
-      } else {
-        console.log(
-          `[${asset.symbol}] Skipping UP late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
-        );
-      }
+    if ((pUp >= 0.85 || (minsLeft * 60 < 7 && pUp >= 0.80)) && z > Z_MIN && upAsk != null) {
+      lateSide = "UP";
+      sideProb = pUp;
+      sideAsk = upAsk;
+    } else if ((pDown >= 0.85 || (minsLeft * 60 < 7 && pDown >= 0.80)) && z < -Z_MIN && downAsk != null) {
+      lateSide = "DOWN";
+      sideProb = pDown;
+      sideAsk = downAsk;
     }
 
-    // DOWN side
-    if ((pDown >= 0.85 || (secsLeft < 7 && pDown >= 0.80)) && z < -Z_MIN) {
-      if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
+    if (!lateSide || sideAsk == null) {
+      console.log(`[${asset.symbol}] Late game: no eligible side/ask.`);
+    } else {
+      // EV check at current best ask
+      const evAtAsk = sideProb - sideAsk;
+      const lateMinEdge = MIN_EDGE_LATE;  // or something slightly stricter if you want
+
+      console.log(
+        `[${asset.symbol}] Late game candidate: side=${lateSide}, ` +
+        `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}, EV=${evAtAsk.toFixed(4)}`
+      );
+
+      if (evAtAsk <= lateMinEdge) {
         console.log(
-          `[${asset.symbol}] Late game: BUY DOWN (high probability / very late)`
+          `[${asset.symbol}] Late game: EV at ask not good enough (<= ${lateMinEdge}). Skipping.`
         );
-        const resp = await client.createAndPostOrder(
-          {
-            tokenID: downTokenId,
-            price: limitPrice,
-            side: Side.BUY,
-            size: orderSize,
-            expiration: String(expiresAt),
-          },
-          { tickSize: "0.01", negRisk: false },
-          OrderType.GTD
-        );
-        console.log(`[${asset.symbol}] DOWN GTD:`, resp);
-        state.sharesBoughtBySlug[slug] =
-          (state.sharesBoughtBySlug[slug] || 0) + orderSize;
-        addPosition(state, slug, "DOWN", orderSize);
       } else {
-        console.log(
-          `[${asset.symbol}] Skipping DOWN late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
-        );
+        const slugShares = state.sharesBoughtBySlug[slug] || 0;
+        const orderSize = 100;
+
+        if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
+          const limitPrice = Number(sideAsk.toFixed(2)); // cross current ask
+
+          console.log(
+            `[${asset.symbol}] Late game: BUY ${lateSide} @ ${limitPrice} ` +
+            `(ask), size=${orderSize}, EV=${evAtAsk.toFixed(4)}`
+          );
+
+          const resp = await client.createAndPostOrder(
+            {
+              tokenID: lateSide === "UP" ? upTokenId : downTokenId,
+              price: limitPrice,
+              side: Side.BUY,
+              size: orderSize,
+              expiration: String(expiresAt),
+            },
+            { tickSize: "0.01", negRisk: false },
+            OrderType.GTD
+          );
+
+          console.log(`[${asset.symbol}] LATE ORDER RESP:`, resp);
+          state.sharesBoughtBySlug[slug] = slugShares + orderSize;
+          addPosition(state, slug, lateSide, orderSize);
+        } else {
+          console.log(
+            `[${asset.symbol}] Skipping late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
+          );
+        }
       }
     }
   }
