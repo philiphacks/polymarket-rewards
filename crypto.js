@@ -65,18 +65,26 @@ console.log("Address:", await signer.getAddress());
 const client = new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, SIGNATURE_TYPE, FUNDER);
 
 // Vol config (multi-asset) from btc_sigma_1m.json
-// EXPECTED SHAPE:
-// {
-//   "assets": {
-//     "BTC/USD": { "sigmaPerMinUSD": 63.1, ... },
-//     "ETH/USD": { "sigmaPerMinUSD": ... },
-//     "SOL/USD": { "sigmaPerMinUSD": ... },
-//     "XRP/USD": { "sigmaPerMinUSD": ... }
-//   },
-//   "updatedAt": "..."
-//   ...
-// }
-const sigmaConfig = JSON.parse(fs.readFileSync("btc_sigma_1m.json", "utf8"));
+function loadSigmaConfig() {
+  try {
+    const raw = fs.readFileSync("btc_sigma_1m.json", "utf8");
+    const parsed = JSON.parse(raw);
+    console.log(
+      "[VOL] Loaded sigma file keys:",
+      Object.keys(parsed)
+    );
+    return parsed;
+  } catch (err) {
+    console.error("[VOL] Failed to load btc_sigma_1m.json:", err);
+    // fallback: keep previous config if it exists, else empty object
+    return typeof sigmaConfig !== "undefined" && sigmaConfig
+      ? sigmaConfig
+      : {};
+  }
+}
+
+// **NEW** mutable sigmaConfig that can be reloaded
+let sigmaConfig = loadSigmaConfig();
 console.log("Loaded sigma file keys:", Object.keys(sigmaConfig));
 
 // ---------- UTILS ----------
@@ -605,9 +613,14 @@ async function execAll() {
   }
 }
 
-let task = cron.schedule(`*/${interval} * * * * *`, async () => {
+cron.schedule(`*/${interval} * * * * *`, async () => {
   await execAll().catch((err) => {
     console.error('Fatal error in main():', err);
     process.exit(1);
   });
+});
+
+cron.schedule("0 0 */2 * * *", () => {
+  console.log("\n[VOL] Reloading btc_sigma_1m.json (2h refresh)...");
+  sigmaConfig = loadSigmaConfig();
 });

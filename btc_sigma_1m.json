@@ -1,28 +1,28 @@
 {
   "symbol": "Crypto.BTC/USD",
   "hoursBack": 2,
-  "sigmaPerMinUSD": 45.79926257418105,
+  "sigmaPerMinUSD": 47.87281734493866,
   "bars": 120,
-  "updatedAt": "2025-11-15T07:01:17.148Z",
+  "updatedAt": "2025-11-15T07:39:23.685Z",
   "assets": {
     "BTC": {
       "symbol": "Crypto.BTC/USD",
-      "sigmaPerMinUSD": 45.79926257418105,
+      "sigmaPerMinUSD": 47.87281734493866,
       "bars": 120
     },
     "ETH": {
       "symbol": "Crypto.ETH/USD",
-      "sigmaPerMinUSD": 1.933309429836242,
+      "sigmaPerMinUSD": 1.8633136490632651,
       "bars": 120
     },
     "SOL": {
       "symbol": "Crypto.SOL/USD",
-      "sigmaPerMinUSD": 0.09695194992923567,
+      "sigmaPerMinUSD": 0.09926698870132793,
       "bars": 120
     },
     "XRP": {
       "symbol": "Crypto.XRP/USD",
-      "sigmaPerMinUSD": 0.0016397831615615388,
+      "sigmaPerMinUSD": 0.001463794730615274,
       "bars": 120
     }
   }
