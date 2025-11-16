@@ -51,9 +51,10 @@ const MIN_EDGE_EARLY = 0.08;  // minsLeft > MINUTES_LEFT
 const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
 // const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
-const Z_MAX_FAR_MINUTES = 10;
+const Z_MAX_FAR_MINUTES = 6;
 const Z_MAX_NEAR_MINUTES = 3;
-const Z_MAX_FAR = 3.0;
+const Z_HUGE = 3.0;
+const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
 
@@ -490,18 +491,22 @@ async function execForAsset(asset) {
 
   console.log(`[${asset.symbol}] min z-score:`, Z_MIN.toFixed(3));
   console.log(`[${asset.symbol}] z-score:`, z.toFixed(3));
-  console.log(`[${asset.symbol}] Model P(Up):`, pUp.toFixed(4));
-  console.log(`[${asset.symbol}] Model P(Down):`, pDown.toFixed(4));
+  console.log(`[${asset.symbol}] Model P(Up):`, pUp.toFixed(4), `| Model P(Down):`, pDown.toFixed(4));
 
   const zMaxDynamic = dynamicZMax(minsLeft);
-  console.log(
-    `[${asset.symbol}] dynamic Z_MAX (minsLeft=${minsLeft.toFixed(2)}): ${zMaxDynamic.toFixed(3)}`
-  );
+  const absZ = Math.abs(z);
 
   // If |z| small AND still early → no trade
-  if ((Math.abs(z) < zMaxDynamic || Math.abs(z) > 5) && minsLeft > MINUTES_LEFT) {
+  if (
+    absZ > 5 ||                            // sanity
+    minsLeft > 5 ||                        // too early, always skip
+    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, z not huge
+    (minsLeft <= MINUTES_LEFT && absZ < zMaxDynamic)               // ≤3m, z not big enough
+  ) {
     console.log(
-      `[${asset.symbol}] Earlier than ${MINUTES_LEFT} mins left and |z| not huge. No trade yet.`
+      `[${asset.symbol}] Skip: minsLeft=${minsLeft.toFixed(2)}, |z|=${absZ.toFixed(
+        3
+      )}, Z_HUGE=${Z_HUGE}, Z_MAXdyn=${zMaxDynamic.toFixed(3)}`
     );
     return;
   }
