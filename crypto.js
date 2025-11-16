@@ -243,10 +243,10 @@ function sleep(ms) {
 // Get per-asset sigma
 function getSigmaPerMinUSD(volKey) {
   const floorByAsset = {
-    "BTC": 42,
-    "ETH": 2.3,
-    "SOL": 0.125,
-    "XRP": 0.0017,
+    "BTC": 50,
+    "ETH": 3.0,
+    "SOL": 0.15,
+    "XRP": 0.0025,
   };
 
   const assets = sigmaConfig.assets || {};
