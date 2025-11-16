@@ -403,10 +403,6 @@ async function execForAsset(asset) {
     Number(state.cpData.openPrice) > 0
   ) {
     startPrice = Number(state.cpData.openPrice);
-    console.log(
-      `[${asset.symbol}] Using CACHED start price (openPrice):`,
-      startPrice
-    );
   } else {
     const cpRes = await fetch(cryptoPriceUrl);
 
@@ -468,7 +464,7 @@ async function execForAsset(asset) {
     return;
   }
   const currentPrice = raw * Math.pow(10, expo);
-  console.log(`[${asset.symbol}] Current price (Pyth):`, currentPrice);
+  console.log(`[${asset.symbol}] Open price $${startPrice.toFixed(5)} vs current price (Pyth) $${currentPrice.toFixed(5)}`);
 
   // Sanity check: Polymarket vs Pyth
   const relDiff = Math.abs(currentPrice - startPrice) / startPrice;
@@ -482,14 +478,13 @@ async function execForAsset(asset) {
 
   // 4) Compute probability Up using per-asset σ
   const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
-  console.log(`[${asset.symbol}] Got σ ${SIGMA_PER_MIN} (1 stdev)`);
   const sigmaT = SIGMA_PER_MIN * Math.sqrt(minsLeft);
   const diff = currentPrice - startPrice;
   const z = diff / sigmaT;
   const pUp = normCdf(z);
   const pDown = 1 - pUp;
 
-  console.log(`[${asset.symbol}] z-score:`, z.toFixed(3), `Model P(Up):`, pUp.toFixed(4), `| Model P(Down):`, pDown.toFixed(4));
+  console.log(`[${asset.symbol}] σ ${SIGMA_PER_MIN.toFixed(5)}`, `| z-score:`, z.toFixed(3), `| Model P(Up):`, pUp.toFixed(4), `| Model P(Down):`, pDown.toFixed(4));
 
   const zMaxDynamic = dynamicZMax(minsLeft);
   const absZ = Math.abs(z);
