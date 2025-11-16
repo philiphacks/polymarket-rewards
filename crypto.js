@@ -81,10 +81,7 @@ function loadSigmaConfig() {
     return parsed;
   } catch (err) {
     console.error("[VOL] Failed to load btc_sigma_1m.json:", err);
-    // fallback: keep previous config if it exists, else empty object
-    return typeof sigmaConfig !== "undefined" && sigmaConfig
-      ? sigmaConfig
-      : {};
+    return {};
   }
 }
 
@@ -160,6 +157,57 @@ function dynamicZMax(minsLeft) {
     (Z_MAX_FAR_MINUTES - minsLeft) /
     (Z_MAX_FAR_MINUTES - Z_MAX_NEAR_MINUTES);
   return Z_MAX_FAR - t * (Z_MAX_FAR - Z_MAX_NEAR);
+}
+
+// helper to check if we can place an order given caps
+function canPlaceOrder(state, slug, side, size, assetSymbol) {
+  const totalCap = getMaxSharesForMarket(assetSymbol);
+
+  const totalBefore = state.sharesBoughtBySlug[slug] || 0;
+
+  const pos = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
+  const upBefore = pos.UP || 0;
+  const downBefore = pos.DOWN || 0;
+
+  const netBefore = upBefore - downBefore;
+  const sideSign = side === "UP" ? 1 : -1;
+  const netAfter = netBefore + sideSign * size;
+
+  const totalAfter = totalBefore + size;
+
+  // Case 1: within total cap => always allowed
+  if (totalAfter <= totalCap) {
+    return {
+      ok: true,
+      reason: "within_cap",
+      totalBefore,
+      totalAfter,
+      netBefore,
+      netAfter,
+    };
+  }
+
+  // Case 2: exceeding total cap, only allow if hedge (reduces |net|)
+  if (Math.abs(netAfter) < Math.abs(netBefore)) {
+    return {
+      ok: true,
+      reason: "hedge_beyond_cap",
+      totalBefore,
+      totalAfter,
+      netBefore,
+      netAfter,
+    };
+  }
+
+  // Otherwise: reject – would add risk beyond cap
+  return {
+    ok: false,
+    reason: "risk_increase_beyond_cap",
+    totalBefore,
+    totalAfter,
+    netBefore,
+    netAfter,
+  };
 }
 
 // Best bid/ask from order book
@@ -359,7 +407,6 @@ async function execForAsset(asset) {
       startPrice
     );
   } else {
-    console.log('fetching crapto url', cryptoPriceUrl);
     const cpRes = await fetch(cryptoPriceUrl);
 
     if (cpRes.status === 429) {
@@ -546,44 +593,84 @@ async function execForAsset(asset) {
     if (!lateSide || sideAsk == null) {
       console.log(`[${asset.symbol}] Late game: no eligible side/ask.`);
     } else {
-      // EV check at current best ask
-      const evAtAsk = sideProb - sideAsk;
+      // Hybrid layered model
+      // Target layer "anchor" prices in probability space.
+      // We will clamp them against current best ask and EV checks.
+      // const LAYER_ANCHORS = [0.96, 0.98, 0.99];
+      const LAYER_OFFSETS = [-0.03, -0.01, 0.0];
+      const LAYER_SIZES = [40, 40, 20];
+      const MIN_LATE_LAYER_EV = 0.03;
 
       console.log(
-        `[${asset.symbol}] Late game candidate: side=${lateSide}, ` +
-        `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}, EV=${evAtAsk.toFixed(4)}`
+        `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
+        `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`
       );
 
-      const slugShares = state.sharesBoughtBySlug[slug] || 0;
-      const orderSize = 100;
+      for (let i = 0; i < LAYER_OFFSETS.length; i++) {
+        // Start from the larger of: current best ask, layer anchor
+        let target = sideAsk + LAYER_OFFSETS[i];
+        target = Math.max(0.01, Math.min(target, 0.99));
 
-      if (slugShares + orderSize <= getMaxSharesForMarket(asset.symbol)) {
-        const limitPrice = Number(sideAsk.toFixed(2)); // cross current ask
+        const ev = sideProb - target;
+        // if (ev < MIN_LATE_LAYER_EV) {
+        //   console.log(
+        //     `[${asset.symbol}] Layer ${i}: skip @${target.toFixed(
+        //       2
+        //     )} (EV=${ev.toFixed(4)} < ${MIN_LATE_LAYER_EV}).`
+        //   );
+        //   continue;
+        // }
+
+        let layerSize = LAYER_SIZES[i];
+        const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
+        if (!capCheck.ok) {
+          console.log(
+            `[${asset.symbol}] Skipping layer ${i}; cap hit and not hedging. ` +
+            `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
+            `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
+          );
+          continue;
+        }
+
+        if (capCheck.reason === "hedge_beyond_cap") {
+          console.log(
+            `[${asset.symbol}] Layer ${i} allowed beyond cap because it reduces net exposure. ` +
+            `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
+          );
+        }
+
+        const limitPrice = Number(target.toFixed(2));
 
         console.log(
-          `[${asset.symbol}] Late game: BUY ${lateSide} @ ${limitPrice} ` +
-          `(ask), size=${orderSize}, EV=${evAtAsk.toFixed(4)}`
+          `[${asset.symbol}] Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, ` +
+          `size=${layerSize}, EV=${ev.toFixed(4)}`
         );
 
-        const resp = await client.createAndPostOrder(
-          {
-            tokenID: lateSide === "UP" ? upTokenId : downTokenId,
-            price: limitPrice,
-            side: Side.BUY,
-            size: orderSize,
-            expiration: String(expiresAt),
-          },
-          { tickSize: "0.01", negRisk: false },
-          OrderType.GTD
-        );
+        const tokenID = lateSide === "UP" ? upTokenId : downTokenId;
 
-        console.log(`[${asset.symbol}] LATE ORDER RESP:`, resp);
-        state.sharesBoughtBySlug[slug] = slugShares + orderSize;
-        addPosition(state, slug, lateSide, orderSize);
-      } else {
-        console.log(
-          `[${asset.symbol}] Skipping late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
-        );
+        try {
+          const resp = await client.createAndPostOrder(
+            {
+              tokenID,
+              price: limitPrice,
+              side: Side.BUY,
+              size: layerSize,
+              expiration: String(expiresAt),
+            },
+            { tickSize: "0.01", negRisk: false },
+            OrderType.GTD
+          );
+
+          console.log(`[${asset.symbol}] LATE LAYER ${i} RESP:`, resp);
+          state.sharesBoughtBySlug[slug] =
+            (state.sharesBoughtBySlug[slug] || 0) + layerSize;
+          addPosition(state, slug, lateSide, layerSize);
+        } catch (err) {
+          console.log(
+            `[${asset.symbol}] Error placing late layer ${i}:`,
+            err?.message || err
+          );
+        }
       }
     }
   }
@@ -597,14 +684,21 @@ async function execForAsset(asset) {
   }
 
   const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
-  const currentShares = state.sharesBoughtBySlug[slug] || 0;
   const size = 100;
-
-  if (currentShares + size > getMaxSharesForMarket(asset.symbol)) {
+  const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
+  if (!capCheck.ok) {
     console.log(
-      `[${asset.symbol}] Skipping EV buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
+      `[${asset.symbol}] Skipping EV buy; cap hit and not hedging. ` +
+      `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
+      `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
     );
     return;
+  }
+  if (capCheck.reason === "hedge_beyond_cap") {
+    console.log(
+      `[${asset.symbol}] EV buy allowed beyond total cap because it reduces net exposure. ` +
+      `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
+    );
   }
 
   console.log(
@@ -627,7 +721,9 @@ async function execForAsset(asset) {
   );
 
   console.log(`[${asset.symbol}] ORDER RESP:`, resp);
+  const currentShares = state.sharesBoughtBySlug[slug] || 0;
   state.sharesBoughtBySlug[slug] = currentShares + size;
+  addPosition(state, slug, best.side, size);
   addPosition(state, slug, best.side, size);
 }
 
