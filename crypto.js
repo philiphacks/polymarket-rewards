@@ -289,7 +289,7 @@ function addPosition(state, slug, side, size) {
 function requiredLateProb(secsLeft) {
   const maxSecs = 120;   // 2 minutes window
   const pHigh = 0.90;    // require 90% when 2m left
-  const pLow  = 0.80;    // allow 80% right at expiry
+  const pLow  = 0.85;    // allow 85% right at expiry
 
   // clamp secsLeft to [0, maxSecs]
   const clamped = Math.max(0, Math.min(maxSecs, secsLeft));
