@@ -37,23 +37,55 @@ const ASSETS = [
   },
 ];
 
-// Max shares per 15m market *per asset*
-const MAX_SHARES_PER_MARKET = {
-  BTC: 400,
-  ETH: 400,
-  SOL: 400,
-  XRP: 400,
+// ---------- WINDOW CONFIG (15m + 60m) ----------
+
+// **NEW** per-window config (time behaviour, slug, crypto-price variant)
+const MARKET_WINDOWS = [ // **NEW**
+  {
+    key: "15m",                     // **NEW**
+    minutes: 15,                    // **NEW**
+    slugPart: "15m",                // **NEW**
+    cryptoVariant: "fifteen",       // **NEW** matches your current code
+    MINUTES_LEFT: 3,                // **NEW** only act in last X mins unless |z| big
+    Z_MAX_FAR_MINUTES: 10,         // **NEW** for dynamicZMax
+    Z_MAX_NEAR_MINUTES: 3,         // **NEW**
+    LATE_TRIGGER_MIN: 2,           // **NEW** late-game mode below this
+    MAX_MINUTES_BEFORE_START_TRADING: 14, // **NEW** was `minsLeft > 14` early-return
+  },
+  {
+    key: "60m",                     // **NEW**
+    minutes: 60,                    // **NEW**
+    slugPart: "60m",                // **NEW**
+    cryptoVariant: "sixty",         // **NEW** TODO: confirm actual variant string in Polymarket API
+    MINUTES_LEFT: 12,              // **NEW** ~last 20% of hour
+    Z_MAX_FAR_MINUTES: 45,         // **NEW**
+    Z_MAX_NEAR_MINUTES: 8,         // **NEW**
+    LATE_TRIGGER_MIN: 8,           // **NEW** late-game ~last 8 minutes
+    MAX_MINUTES_BEFORE_START_TRADING: 55, // **NEW**
+  },
+];
+
+// Max shares per market *per asset* and per window
+const MAX_SHARES_PER_MARKET = {    // **NEW**
+  "15m": {                         // **NEW**
+    BTC: 400,
+    ETH: 400,
+    SOL: 400,
+    XRP: 400,
+  },
+  "60m": {                         // **NEW** you can tweak these separately
+    BTC: 300,
+    ETH: 300,
+    SOL: 300,
+    XRP: 300,
+  },
 };
 
 // Time / z thresholds & sanity checks
-const MINUTES_LEFT = 3;    // only act in last X minutes (unless |z| big)
-const MIN_EDGE_EARLY = 0.08;  // minsLeft > MINUTES_LEFT
-const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT
-const Z_MIN = 0.5;         // min |z| to even consider directional trade
-// const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
-const Z_MAX_FAR_MINUTES = 10;
-const Z_MAX_NEAR_MINUTES = 3;
-const Z_MAX_FAR = 3.0;
+const MIN_EDGE_EARLY = 0.07;  // minsLeft > MINUTES_LEFT (per window)
+const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT (per window)
+const Z_MIN = 0.5;            // min |z| to even consider directional trade
+const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
 
@@ -85,35 +117,34 @@ function loadSigmaConfig() {
   }
 }
 
-// **NEW** mutable sigmaConfig that can be reloaded
+// mutable sigmaConfig that can be reloaded
 let sigmaConfig = loadSigmaConfig();
 console.log("Loaded sigma file keys:", Object.keys(sigmaConfig));
 
 // ---------- UTILS ----------
 
-// Returns unix timestamp (seconds) of the start of the current 15-min interval
-function current15mStartUnix(date = new Date()) {
-  const ms = date.getTime();
-  const intervalMs = 15 * 60 * 1000;
-  return Math.floor(ms / intervalMs) * (intervalMs / 1000);
-}
-
-// Generic slug for 15m up/down markets
-function crypto15mSlug(slugPrefix, date = new Date()) {
-  return `${slugPrefix}-updown-15m-${current15mStartUnix(date)}`;
-}
-
-// Start of the current 15-minute interval (UTC)
-function current15mStartUTC(date = new Date()) {
+// **NEW**: generic "snap to window" time utilities
+function currentWindowStartUTC(windowMinutes, date = new Date()) { // **NEW**
   const d = new Date(date);
-  d.setUTCMinutes(Math.floor(d.getUTCMinutes() / 15) * 15, 0, 0);
+  const mins = d.getUTCMinutes();
+  const snapped = Math.floor(mins / windowMinutes) * windowMinutes;
+  d.setUTCMinutes(snapped, 0, 0);
   return d;
 }
 
-// End of the current 15-minute interval (UTC)
-function current15mEndUTC(date = new Date()) {
-  const start = current15mStartUTC(date);
-  return new Date(start.getTime() + 15 * 60 * 1000);
+function currentWindowEndUTC(windowMinutes, date = new Date()) {   // **NEW**
+  const start = currentWindowStartUTC(windowMinutes, date);
+  return new Date(start.getTime() + windowMinutes * 60 * 1000);
+}
+
+function currentWindowStartUnix(windowMinutes, date = new Date()) { // **NEW**
+  const start = currentWindowStartUTC(windowMinutes, date);
+  return Math.floor(start.getTime() / 1000);
+}
+
+// Generic slug for up/down markets per window
+function cryptoSlugForWindow(slugPrefix, windowCfg, date = new Date()) { // **NEW**
+  return `${slugPrefix}-updown-${windowCfg.slugPart}-${currentWindowStartUnix(windowCfg.minutes, date)}`;
 }
 
 // ISO without milliseconds
@@ -121,16 +152,16 @@ function isoNoMs(d) {
   return d.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
-// Polymarket crypto-price URL for a symbol
-function cryptoPriceUrl({ symbol, date = new Date(), variant = "fifteen" }) {
-  const start = current15mStartUTC(date);
-  const end = current15mEndUTC(date);
+// Polymarket crypto-price URL for a symbol + window
+function cryptoPriceUrlForWindow({ symbol, windowCfg, date = new Date() }) { // **NEW**
+  const start = currentWindowStartUTC(windowCfg.minutes, date);
+  const end = currentWindowEndUTC(windowCfg.minutes, date);
 
   const base = "https://polymarket.com/api/crypto/crypto-price";
   const params = new URLSearchParams({
     symbol,
     eventStartTime: isoNoMs(start),
-    variant,
+    variant: windowCfg.cryptoVariant,
     endDate: isoNoMs(end),
   });
   return `${base}?${params.toString()}`;
@@ -149,19 +180,20 @@ function normCdf(z) {
   return p;
 }
 
-function dynamicZMax(minsLeft) {
-  if (minsLeft >= Z_MAX_FAR_MINUTES) return Z_MAX_FAR;
-  if (minsLeft <= Z_MAX_NEAR_MINUTES) return Z_MAX_NEAR;
+function dynamicZMax(minsLeft, windowCfg) { // **NEW** now window-aware
+  const farM = windowCfg.Z_MAX_FAR_MINUTES;
+  const nearM = windowCfg.Z_MAX_NEAR_MINUTES;
 
-  const t =
-    (Z_MAX_FAR_MINUTES - minsLeft) /
-    (Z_MAX_FAR_MINUTES - Z_MAX_NEAR_MINUTES);
+  if (minsLeft >= farM) return Z_MAX_FAR;
+  if (minsLeft <= nearM) return Z_MAX_NEAR;
+
+  const t = (farM - minsLeft) / (farM - nearM);
   return Z_MAX_FAR - t * (Z_MAX_FAR - Z_MAX_NEAR);
 }
 
 // helper to check if we can place an order given caps
-function canPlaceOrder(state, slug, side, size, assetSymbol) {
-  const totalCap = getMaxSharesForMarket(assetSymbol);
+function canPlaceOrder(state, slug, side, size, assetSymbol, windowKey) { // **NEW arg windowKey**
+  const totalCap = getMaxSharesForMarket(windowKey, assetSymbol);         // **NEW**
 
   const totalBefore = state.sharesBoughtBySlug[slug] || 0;
 
@@ -276,7 +308,7 @@ function getExistingSide(state, slug) {
   return null; // roughly flat
 }
 
-// **NEW**: helper to bump side position after trade
+// helper to bump side position after trade
 function addPosition(state, slug, side, size) {
   if (!state.sideSharesBySlug[slug]) {
     state.sideSharesBySlug[slug] = { UP: 0, DOWN: 0 };
@@ -301,16 +333,30 @@ function requiredLateProb(secsLeft) {
 }
 
 // ---------- PER-ASSET STATE ----------
-const stateBySymbol = {};
+const stateBySymbol = {}; // symbol -> { [windowKey]: windowState }  // **NEW comment**
 
-// Initialize/Reset state for an asset (new 15m window)
-function resetStateForAsset(asset) {
-  const slug = crypto15mSlug(asset.slugPrefix);
-  const cryptoUrl = cryptoPriceUrl({ symbol: asset.symbol });
+function getMaxSharesForMarket(windowKey, symbol) { // **NEW signature**
+  const perWindow = MAX_SHARES_PER_MARKET[windowKey];
+  if (!perWindow) return 500;
+  return perWindow[symbol] ?? 500;
+}
+
+// Initialize/Reset state for an asset + window
+function resetStateForAssetAndWindow(asset, windowCfg) { // **NEW**
+  const slug = cryptoSlugForWindow(asset.slugPrefix, windowCfg);    // **NEW**
+  const cryptoUrl = cryptoPriceUrlForWindow({                      // **NEW**
+    symbol: asset.symbol,
+    windowCfg,
+  });
   const gammaUrl = `https://gamma-api.polymarket.com/markets/slug/${slug}`;
 
-  stateBySymbol[asset.symbol] = {
+  if (!stateBySymbol[asset.symbol]) {                              // **NEW**
+    stateBySymbol[asset.symbol] = {};                              // **NEW**
+  }
+
+  stateBySymbol[asset.symbol][windowCfg.key] = {                   // **NEW**
     slug,
+    windowKey: windowCfg.key,   // **NEW**
     cryptoPriceUrl: cryptoUrl,
     gammaUrl,
     sharesBoughtBySlug: { [slug]: 0 }, // track per-market
@@ -321,37 +367,34 @@ function resetStateForAsset(asset) {
   };
 
   console.log(
-    `[${asset.symbol}] Reset: slug=${slug}, cryptoPriceUrl=${cryptoUrl}, gammaUrl=${gammaUrl}`
+    `[${asset.symbol}][${windowCfg.key}] Reset: slug=${slug}, cryptoPriceUrl=${cryptoUrl}, gammaUrl=${gammaUrl}`
   );
 }
 
 // Ensure state exists
-function ensureState(asset) {
-  if (!stateBySymbol[asset.symbol]) {
-    resetStateForAsset(asset);
+function ensureState(asset, windowCfg) { // **NEW signature**
+  if (!stateBySymbol[asset.symbol] ||
+      !stateBySymbol[asset.symbol][windowCfg.key]) {
+    resetStateForAssetAndWindow(asset, windowCfg);
   }
-  return stateBySymbol[asset.symbol];
+  return stateBySymbol[asset.symbol][windowCfg.key];
 }
 
-function getMaxSharesForMarket(volKey) {
-  return MAX_SHARES_PER_MARKET[volKey] || 500;
-}
-
-// ---------- CORE EXECUTION PER ASSET ----------
-async function execForAsset(asset) {
-  const state = ensureState(asset);
+// ---------- CORE EXECUTION PER ASSET + WINDOW ----------
+async function execForAssetWindow(asset, windowCfg) { // **NEW (replaces execForAsset)**
+  const state = ensureState(asset, windowCfg);
   if (state.resetting) return;
 
   const { slug, cryptoPriceUrl, gammaUrl } = state;
 
-  console.log(`\n\n===== ${asset.symbol} | slug=${slug} =====`);
+  console.log(`\n\n===== ${asset.symbol} [${windowCfg.key}] | slug=${slug} =====`);
 
   // 1) Fetch/cached market meta from Gamma
   if (!state.marketMeta || state.marketMeta.slug !== slug) {
     const gammaRes = await fetch(gammaUrl);
     if (!gammaRes.ok) {
       console.log(
-        `[${asset.symbol}] Gamma request failed: ${gammaRes.status} ${gammaRes.statusText}`
+        `[${asset.symbol}][${windowCfg.key}] Gamma request failed: ${gammaRes.status} ${gammaRes.statusText}`
       );
       return;
     }
@@ -365,11 +408,11 @@ async function execForAsset(asset) {
       question: market.question,
       endMs,
       tokenIds,
-      endDate: market.endDate
+      endDate: market.endDate,
     };
 
     console.log(
-      `[${asset.symbol}] Cached marketMeta for slug=${slug}, id=${market.id}`
+      `[${asset.symbol}][${windowCfg.key}] Cached marketMeta for slug=${slug}, id=${market.id}`
     );
   }
 
@@ -377,18 +420,18 @@ async function execForAsset(asset) {
   const nowMs = Date.now();
   const minsLeft = Math.max((endMs - nowMs) / 60000, 0.001);
 
-  console.log(`[${asset.symbol}] Question:`, question);
-  console.log(`[${asset.symbol}] End date:`, endDate);
-  console.log(`[${asset.symbol}] Minutes left:`, minsLeft.toFixed(3));
+  console.log(`[${asset.symbol}][${windowCfg.key}] Question:`, question);
+  console.log(`[${asset.symbol}][${windowCfg.key}] End date:`, endDate);
+  console.log(`[${asset.symbol}][${windowCfg.key}] Minutes left:`, minsLeft.toFixed(3));
 
-  if (minsLeft > 14) return;
+  if (minsLeft > windowCfg.MAX_MINUTES_BEFORE_START_TRADING) return; // **NEW**
 
-  // If market basically over, wait a bit and reset to next 15m market
+  // If market basically over, wait a bit and reset to next window
   if (minsLeft < 0.01) {
     state.resetting = true;
-    console.log(`[${asset.symbol}] Interval over. Resetting in 30s...`);
+    console.log(`[${asset.symbol}][${windowCfg.key}] Interval over. Resetting in 30s...`);
     await sleep(30_000);
-    resetStateForAsset(asset);
+    resetStateForAssetAndWindow(asset, windowCfg);
     return;
   }
 
@@ -398,12 +441,12 @@ async function execForAsset(asset) {
 
   if (
     state.cpData &&
-    Number.isFinite(Number(state.cpData.openPrice)) && 
+    Number.isFinite(Number(state.cpData.openPrice)) &&
     Number(state.cpData.openPrice) > 0
   ) {
     startPrice = Number(state.cpData.openPrice);
     console.log(
-      `[${asset.symbol}] Using CACHED start price (openPrice):`,
+      `[${asset.symbol}][${windowCfg.key}] Using CACHED start price (openPrice):`,
       startPrice
     );
   } else {
@@ -411,7 +454,7 @@ async function execForAsset(asset) {
 
     if (cpRes.status === 429) {
       console.log(
-        `[${asset.symbol}] crypto-price 429 (rate limited). Sleeping 3s and skipping this tick.`
+        `[${asset.symbol}][${windowCfg.key}] crypto-price 429 (rate limited). Sleeping 3s and skipping this tick.`
       );
       await sleep(3000);
       return;
@@ -419,7 +462,7 @@ async function execForAsset(asset) {
 
     if (!cpRes.ok) {
       console.log(
-        `[${asset.symbol}] crypto-price failed: ${cpRes.status} ${cpRes.statusText}`
+        `[${asset.symbol}][${windowCfg.key}] crypto-price failed: ${cpRes.status} ${cpRes.statusText}`
       );
       return;
     }
@@ -428,7 +471,7 @@ async function execForAsset(asset) {
 
     if (!Number.isFinite(candidate) || candidate <= 0) {
       console.log(
-        `[${asset.symbol}] openPrice missing / non-numeric / non-positive (=${cp.openPrice}). Not caching; skipping this tick.`
+        `[${asset.symbol}][${windowCfg.key}] openPrice missing / non-numeric / non-positive (=${cp.openPrice}). Not caching; skipping this tick.`
       );
       return;
     }
@@ -440,7 +483,7 @@ async function execForAsset(asset) {
 
     startPrice = candidate;
     console.log(
-      `[${asset.symbol}] Start price (openPrice) fetched & cached:`,
+      `[${asset.symbol}][${windowCfg.key}] Start price (openPrice) fetched & cached:`,
       startPrice
     );
   }
@@ -452,7 +495,7 @@ async function execForAsset(asset) {
   const pythRes = await fetch(pythUrl);
   if (!pythRes.ok) {
     console.log(
-      `[${asset.symbol}] Pyth request failed: ${pythRes.status} ${pythRes.statusText}`
+      `[${asset.symbol}][${windowCfg.key}] Pyth request failed: ${pythRes.status} ${pythRes.statusText}`
     );
     return;
   }
@@ -463,17 +506,17 @@ async function execForAsset(asset) {
   const raw = Number(pythPriceObj.price);
   const expo = Number(pythPriceObj.expo);
   if (!Number.isFinite(raw) || !Number.isFinite(expo)) {
-    console.log(`[${asset.symbol}] Pyth price/expo missing`);
+    console.log(`[${asset.symbol}][${windowCfg.key}] Pyth price/expo missing`);
     return;
   }
   const currentPrice = raw * Math.pow(10, expo);
-  console.log(`[${asset.symbol}] Current price (Pyth):`, currentPrice);
+  console.log(`[${asset.symbol}][${windowCfg.key}] Current price (Pyth):`, currentPrice);
 
   // Sanity check: Polymarket vs Pyth
   const relDiff = Math.abs(currentPrice - startPrice) / startPrice;
   if (relDiff > MAX_REL_DIFF) {
     console.log(
-      `[${asset.symbol}] Price sanity FAILED (>${MAX_REL_DIFF * 100}%). Skipping.`,
+      `[${asset.symbol}][${windowCfg.key}] Price sanity FAILED (>${MAX_REL_DIFF * 100}%). Skipping.`,
       { startPrice, currentPrice, relDiff }
     );
     return;
@@ -481,27 +524,28 @@ async function execForAsset(asset) {
 
   // 4) Compute probability Up using per-asset σ
   const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
-  console.log(`[${asset.symbol}] Got σ ${SIGMA_PER_MIN} (1 stdev)`);
+  console.log(`[${asset.symbol}][${windowCfg.key}] Got σ ${SIGMA_PER_MIN} (1 stdev)`);
   const sigmaT = SIGMA_PER_MIN * Math.sqrt(minsLeft);
   const diff = currentPrice - startPrice;
   const z = diff / sigmaT;
   const pUp = normCdf(z);
   const pDown = 1 - pUp;
 
-  console.log(`[${asset.symbol}] min z-score:`, Z_MIN.toFixed(3));
-  console.log(`[${asset.symbol}] z-score:`, z.toFixed(3));
-  console.log(`[${asset.symbol}] Model P(Up):`, pUp.toFixed(4));
-  console.log(`[${asset.symbol}] Model P(Down):`, pDown.toFixed(4));
+  console.log(`[${asset.symbol}][${windowCfg.key}] min z-score:`, Z_MIN.toFixed(3));
+  console.log(`[${asset.symbol}][${windowCfg.key}] z-score:`, z.toFixed(3));
+  console.log(`[${asset.symbol}][${windowCfg.key}] Model P(Up):`, pUp.toFixed(4));
+  console.log(`[${asset.symbol}][${windowCfg.key}] Model P(Down):`, pDown.toFixed(4));
 
-  const zMaxDynamic = dynamicZMax(minsLeft);
+  const zMaxDynamic = dynamicZMax(minsLeft, windowCfg); // **NEW**
   console.log(
-    `[${asset.symbol}] dynamic Z_MAX (minsLeft=${minsLeft.toFixed(2)}): ${zMaxDynamic.toFixed(3)}`
+    `[${asset.symbol}][${windowCfg.key}] dynamic Z_MAX (minsLeft=${minsLeft.toFixed(2)}): ${zMaxDynamic.toFixed(3)}`
   );
 
   // If |z| small AND still early → no trade
-  if ((Math.abs(z) < zMaxDynamic || Math.abs(z) > 5) && minsLeft > MINUTES_LEFT) {
+  if ((Math.abs(z) < zMaxDynamic || Math.abs(z) > 5) &&
+      minsLeft > windowCfg.MINUTES_LEFT) { // **NEW**
     console.log(
-      `[${asset.symbol}] Earlier than ${MINUTES_LEFT} mins left and |z| not huge. No trade yet.`
+      `[${asset.symbol}][${windowCfg.key}] Earlier than ${windowCfg.MINUTES_LEFT} mins left and |z| not huge. No trade yet.`
     );
     return;
   }
@@ -519,21 +563,21 @@ async function execForAsset(asset) {
   const { bestAsk: downAsk } = getBestBidAsk(downBook);
 
   if (upAsk == null && downAsk == null) {
-    console.log(`[${asset.symbol}] No asks on either side. No trade.`);
+    console.log(`[${asset.symbol}][${windowCfg.key}] No asks on either side. No trade.`);
     return;
   }
 
   const mid =
     upAsk != null && downAsk != null ? (upAsk + downAsk) / 2 : upAsk ?? downAsk;
   console.log(
-    `[${asset.symbol}] Up ask / Down ask: ${upAsk?.toFixed(
+    `[${asset.symbol}][${windowCfg.key}] Up ask / Down ask: ${upAsk?.toFixed(
       3
     )} / ${downAsk?.toFixed(3)}, mid≈${mid?.toFixed(3)}`
   );
 
   const existingSide = getExistingSide(state, slug);
   console.log(
-    `[${asset.symbol}] Existing net side: ${existingSide || "FLAT"}`
+    `[${asset.symbol}][${windowCfg.key}] Existing net side: ${existingSide || "FLAT"}`
   );
 
   // Directional buy-only logic (same as before)
@@ -542,35 +586,35 @@ async function execForAsset(asset) {
   if (z >= Z_MIN && upAsk != null) {
     const evBuyUp = pUp - upAsk;
     console.log(
-      `[${asset.symbol}] Up ask=${upAsk.toFixed(
+      `[${asset.symbol}][${windowCfg.key}] Up ask=${upAsk.toFixed(
         3
       )}, EV buy Up (pUp - ask)= ${evBuyUp.toFixed(4)}`
     );
     candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
   } else {
-    console.log(`[${asset.symbol}] We don't buy Up here (z too small or no ask).`);
+    console.log(`[${asset.symbol}][${windowCfg.key}] We don't buy Up here (z too small or no ask).`);
   }
 
   if (z <= -Z_MIN && downAsk != null) {
     const evBuyDown = pDown - downAsk;
     console.log(
-      `[${asset.symbol}] Down ask=${downAsk.toFixed(
+      `[${asset.symbol}][${windowCfg.key}] Down ask=${downAsk.toFixed(
         3
       )}, EV buy Down (pDown - ask)= ${evBuyDown.toFixed(4)}`
     );
     candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
   } else {
     console.log(
-      `[${asset.symbol}] We don't buy Down here (|z| too small or no ask).`
+      `[${asset.symbol}][${windowCfg.key}] We don't buy Down here (|z| too small or no ask).`
     );
   }
 
   // Filter by EV threshold
-  const minEdge = minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE;
+  const minEdge = minsLeft > windowCfg.MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE; // **NEW**
   candidates = candidates.filter((c) => c.ev > minEdge);
 
   // ---------- Late-game "all-in-ish" mode ----------
-  if (Math.abs(z) > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001)) {
+  if (Math.abs(z) > zMaxDynamic || (minsLeft < windowCfg.LATE_TRIGGER_MIN && minsLeft > 0.001)) { // **NEW**
     const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
 
     const secsLeft = minsLeft * 60;
@@ -591,41 +635,30 @@ async function execForAsset(asset) {
     }
 
     if (!lateSide || sideAsk == null) {
-      console.log(`[${asset.symbol}] Late game: no eligible side/ask.`);
+      console.log(`[${asset.symbol}][${windowCfg.key}] Late game: no eligible side/ask.`);
     } else {
       // Hybrid layered model
-      // Target layer "anchor" prices in probability space.
-      // We will clamp them against current best ask and EV checks.
-      // const LAYER_ANCHORS = [0.96, 0.98, 0.99];
       const LAYER_OFFSETS = [-0.03, -0.01, 0.0];
       const LAYER_SIZES = [40, 40, 20];
       const MIN_LATE_LAYER_EV = 0.03;
 
       console.log(
-        `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
+        `[${asset.symbol}][${windowCfg.key}] Late game hybrid: side=${lateSide}, ` +
         `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`
       );
 
       for (let i = 0; i < LAYER_OFFSETS.length; i++) {
-        // Start from the larger of: current best ask, layer anchor
         let target = sideAsk + LAYER_OFFSETS[i];
         target = Math.max(0.01, Math.min(target, 0.99));
 
         const ev = sideProb - target;
-        // if (ev < MIN_LATE_LAYER_EV) {
-        //   console.log(
-        //     `[${asset.symbol}] Layer ${i}: skip @${target.toFixed(
-        //       2
-        //     )} (EV=${ev.toFixed(4)} < ${MIN_LATE_LAYER_EV}).`
-        //   );
-        //   continue;
-        // }
+        // if (ev < MIN_LATE_LAYER_EV) { ... }
 
         let layerSize = LAYER_SIZES[i];
-        const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
+        const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol, windowCfg.key); // **NEW windowKey**
         if (!capCheck.ok) {
           console.log(
-            `[${asset.symbol}] Skipping layer ${i}; cap hit and not hedging. ` +
+            `[${asset.symbol}][${windowCfg.key}] Skipping layer ${i}; cap hit and not hedging. ` +
             `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
             `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
           );
@@ -634,7 +667,7 @@ async function execForAsset(asset) {
 
         if (capCheck.reason === "hedge_beyond_cap") {
           console.log(
-            `[${asset.symbol}] Layer ${i} allowed beyond cap because it reduces net exposure. ` +
+            `[${asset.symbol}][${windowCfg.key}] Layer ${i} allowed beyond cap because it reduces net exposure. ` +
             `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
           );
         }
@@ -642,7 +675,7 @@ async function execForAsset(asset) {
         const limitPrice = Number(target.toFixed(2));
 
         console.log(
-          `[${asset.symbol}] Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, ` +
+          `[${asset.symbol}][${windowCfg.key}] Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, ` +
           `size=${layerSize}, EV=${ev.toFixed(4)}`
         );
 
@@ -661,13 +694,13 @@ async function execForAsset(asset) {
             OrderType.GTD
           );
 
-          console.log(`[${asset.symbol}] LATE LAYER ${i} RESP:`, resp);
+          console.log(`[${asset.symbol}][${windowCfg.key}] LATE LAYER ${i} RESP:`, resp);
           state.sharesBoughtBySlug[slug] =
             (state.sharesBoughtBySlug[slug] || 0) + layerSize;
           addPosition(state, slug, lateSide, layerSize);
         } catch (err) {
           console.log(
-            `[${asset.symbol}] Error placing late layer ${i}:`,
+            `[${asset.symbol}][${windowCfg.key}] Error placing late layer ${i}:`,
             err?.message || err
           );
         }
@@ -678,17 +711,17 @@ async function execForAsset(asset) {
   // ---------- Normal EV-based entries ----------
   if (candidates.length === 0) {
     console.log(
-      `[${asset.symbol}] No trade: no side with enough edge in the right direction.`
+      `[${asset.symbol}][${windowCfg.key}] No trade: no side with enough edge in the right direction.`
     );
     return;
   }
 
   const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
   const size = 100;
-  const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
+  const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol, windowCfg.key); // **NEW windowKey**
   if (!capCheck.ok) {
     console.log(
-      `[${asset.symbol}] Skipping EV buy; cap hit and not hedging. ` +
+      `[${asset.symbol}][${windowCfg.key}] Skipping EV buy; cap hit and not hedging. ` +
       `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
       `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
     );
@@ -696,13 +729,13 @@ async function execForAsset(asset) {
   }
   if (capCheck.reason === "hedge_beyond_cap") {
     console.log(
-      `[${asset.symbol}] EV buy allowed beyond total cap because it reduces net exposure. ` +
+      `[${asset.symbol}][${windowCfg.key}] EV buy allowed beyond total cap because it reduces net exposure. ` +
       `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
     );
   }
 
   console.log(
-    `[${asset.symbol}] >>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
+    `[${asset.symbol}][${windowCfg.key}] >>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
       3
     )}, EV=${best.ev.toFixed(4)}, size=${size}`
   );
@@ -720,10 +753,9 @@ async function execForAsset(asset) {
     OrderType.GTD
   );
 
-  console.log(`[${asset.symbol}] ORDER RESP:`, resp);
+  console.log(`[${asset.symbol}][${windowCfg.key}] ORDER RESP:`, resp);
   const currentShares = state.sharesBoughtBySlug[slug] || 0;
   state.sharesBoughtBySlug[slug] = currentShares + size;
-  addPosition(state, slug, best.side, size);
   addPosition(state, slug, best.side, size);
 }
 
@@ -731,10 +763,12 @@ async function execForAsset(asset) {
 async function execAll() {
   console.log("\n\n\n======================= RUN =======================");
   for (const asset of ASSETS) {
-    try {
-      await execForAsset(asset);
-    } catch (err) {
-      console.error(`[${asset.symbol}] ERROR:`, err);
+    for (const windowCfg of MARKET_WINDOWS) { // **NEW** loop over 15m + 60m
+      try {
+        await execForAssetWindow(asset, windowCfg); // **NEW**
+      } catch (err) {
+        console.error(`[${asset.symbol}][${windowCfg.key}] ERROR:`, err);
+      }
     }
   }
 }
