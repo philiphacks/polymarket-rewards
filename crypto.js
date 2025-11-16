@@ -510,7 +510,7 @@ async function execForAsset(asset) {
   if (
     minsLeft > 5 ||                        // too early, always skip
     (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, z not huge
-    (minsLeft <= MINUTES_LEFT && absZ < zMaxDynamic)               // ≤3m, z not big enough
+    (minsLeft <= MINUTES_LEFT && absZ < Z_MIN)               // ≤3m, z not big enough
   ) {
     const evUp = upAsk != null ? pUp - upAsk : 0;
     const evDown = downAsk != null ? pDown - downAsk : 0;
@@ -726,7 +726,6 @@ async function execForAsset(asset) {
   console.log(`[${asset.symbol}] ORDER RESP:`, resp);
   const currentShares = state.sharesBoughtBySlug[slug] || 0;
   state.sharesBoughtBySlug[slug] = currentShares + size;
-  addPosition(state, slug, best.side, size);
   addPosition(state, slug, best.side, size);
 }
 
