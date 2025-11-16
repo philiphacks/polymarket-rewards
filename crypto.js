@@ -615,14 +615,14 @@ async function execForAsset(asset) {
         target = Math.max(0.01, Math.min(target, 0.99));
 
         const ev = sideProb - target;
-        // if (ev < MIN_LATE_LAYER_EV) {
-        //   console.log(
-        //     `[${asset.symbol}] Layer ${i}: skip @${target.toFixed(
-        //       2
-        //     )} (EV=${ev.toFixed(4)} < ${MIN_LATE_LAYER_EV}).`
-        //   );
-        //   continue;
-        // }
+        if (ev < MIN_LATE_LAYER_EV) {
+          console.log(
+            `[${asset.symbol}] Layer ${i}: skip @${target.toFixed(
+              2
+            )} (EV=${ev.toFixed(4)} < ${MIN_LATE_LAYER_EV}).`
+          );
+          continue;
+        }
 
         let layerSize = LAYER_SIZES[i];
         const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
