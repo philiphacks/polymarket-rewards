@@ -82,10 +82,10 @@ const MAX_SHARES_PER_MARKET = {    // **NEW**
 };
 
 // Time / z thresholds & sanity checks
-const MIN_EDGE_EARLY = 0.07;  // minsLeft > MINUTES_LEFT (per window)
+const MIN_EDGE_EARLY = 0.08;  // minsLeft > MINUTES_LEFT (per window)
 const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT (per window)
 const Z_MIN = 0.5;            // min |z| to even consider directional trade
-const Z_MAX_FAR = 2.5;
+const Z_MAX_FAR = 3.0;
 const Z_MAX_NEAR = 1.7;
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
 
