@@ -486,24 +486,6 @@ async function execForAsset(asset) {
 
   console.log(`[${asset.symbol}] σ ${SIGMA_PER_MIN.toFixed(5)}`, `| z-score:`, z.toFixed(3), `| Model P(Up):`, pUp.toFixed(4), `| Model P(Down):`, pDown.toFixed(4));
 
-  const zMaxDynamic = dynamicZMax(minsLeft);
-  const absZ = Math.abs(z);
-
-  // If |z| small AND still early → no trade
-  if (
-    absZ > 5 ||                            // sanity
-    minsLeft > 5 ||                        // too early, always skip
-    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, z not huge
-    (minsLeft <= MINUTES_LEFT && absZ < zMaxDynamic)               // ≤3m, z not big enough
-  ) {
-    console.log(
-      `[${asset.symbol}] Skip: minsLeft=${minsLeft.toFixed(2)}, |z|=${absZ.toFixed(
-        3
-      )}, Z_HUGE=${Z_HUGE}, Z_MAXdyn=${zMaxDynamic.toFixed(3)}`
-    );
-    return;
-  }
-
   // 5) Order books
   const upTokenId = tokenIds[0];
   const downTokenId = tokenIds[1];
@@ -518,6 +500,27 @@ async function execForAsset(asset) {
 
   if (upAsk == null && downAsk == null) {
     console.log(`[${asset.symbol}] No asks on either side. No trade.`);
+    return;
+  }
+
+  const zMaxDynamic = dynamicZMax(minsLeft);
+  const absZ = Math.abs(z);
+
+  // If |z| small AND still early → no trade
+  if (
+    minsLeft > 5 ||                        // too early, always skip
+    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, z not huge
+    (minsLeft <= MINUTES_LEFT && absZ < zMaxDynamic)               // ≤3m, z not big enough
+  ) {
+    const evUp = upAsk != null ? pUp - upAsk : 0;
+    const evDown = downAsk != null ? pDown - downAsk : 0;
+    console.log(
+      `[${asset.symbol}] Skip: minsLeft=${minsLeft.toFixed(2)}, |z|=${absZ.toFixed(
+        3
+      )}, Z_HUGE=${Z_HUGE}, Z_MAXdyn=${zMaxDynamic.toFixed(3)}, 
+      EV buy Up (pUp - ask) = ${evUp.toFixed(4)}, 
+      EV buy Down (pDown - ask)= ${evDown.toFixed(4)}`
+    );
     return;
   }
 
