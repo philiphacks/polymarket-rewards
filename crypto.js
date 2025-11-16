@@ -237,6 +237,21 @@ function addPosition(state, slug, side, size) {
     (state.sideSharesBySlug[slug][side] || 0) + size;
 }
 
+function requiredLateProb(secsLeft) {
+  const maxSecs = 120;   // 2 minutes window
+  const pHigh = 0.90;    // require 90% when 2m left
+  const pLow  = 0.80;    // allow 80% right at expiry
+
+  // clamp secsLeft to [0, maxSecs]
+  const clamped = Math.max(0, Math.min(maxSecs, secsLeft));
+
+  // t=0 at far end (2m), t=1 at expiry
+  const t = (maxSecs - clamped) / maxSecs;
+
+  // linear interpolation: pHigh -> pLow
+  return pHigh + (pLow - pHigh) * t;
+}
+
 // ---------- PER-ASSET STATE ----------
 const stateBySymbol = {};
 
@@ -511,19 +526,21 @@ async function execForAsset(asset) {
   if (Math.abs(z) > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001)) {
     const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
 
-    // choose side based on probabilities + z sign
+    const secsLeft = minsLeft * 60;
+    const pReq = requiredLateProb(secsLeft);
+
     let lateSide = null;
     let sideProb = null;
     let sideAsk = null;
 
-    if ((pUp >= 0.85 || (minsLeft * 60 < 7 && pUp >= 0.80)) && z > Z_MIN && upAsk != null) {
+    if (pUp >= pReq && z > Z_MIN) {
       lateSide = "UP";
       sideProb = pUp;
-      sideAsk = upAsk;
-    } else if ((pDown >= 0.85 || (minsLeft * 60 < 7 && pDown >= 0.80)) && z < -Z_MIN && downAsk != null) {
+      sideAsk = upAsk || 0.99;
+    } else if (pDown >= pReq && z < -Z_MIN) {
       lateSide = "DOWN";
       sideProb = pDown;
-      sideAsk = downAsk;
+      sideAsk = downAsk || 0.99;
     }
 
     if (!lateSide || sideAsk == null) {
@@ -531,18 +548,12 @@ async function execForAsset(asset) {
     } else {
       // EV check at current best ask
       const evAtAsk = sideProb - sideAsk;
-      const lateMinEdge = MIN_EDGE_LATE;  // or something slightly stricter if you want
 
       console.log(
         `[${asset.symbol}] Late game candidate: side=${lateSide}, ` +
         `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}, EV=${evAtAsk.toFixed(4)}`
       );
 
-      // if (evAtAsk <= lateMinEdge) {
-      //   console.log(
-      //     `[${asset.symbol}] Late game: EV at ask not good enough (<= ${lateMinEdge}). Skipping.`
-      //   );
-      // } else {
       const slugShares = state.sharesBoughtBySlug[slug] || 0;
       const orderSize = 100;
 
@@ -574,7 +585,6 @@ async function execForAsset(asset) {
           `[${asset.symbol}] Skipping late buy; would exceed ${getMaxSharesForMarket(asset.symbol)} shares`
         );
       }
-      // }
     }
   }
 
