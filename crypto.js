@@ -598,8 +598,10 @@ async function execForAsset(asset) {
       // Target layer "anchor" prices in probability space.
       // We will clamp them against current best ask and EV checks.
       // const LAYER_ANCHORS = [0.96, 0.98, 0.99];
-      const LAYER_OFFSETS = [-0.03, -0.01, 0.0];
-      const LAYER_SIZES = [40, 40, 20];
+
+      // TODO: should we ever bid 99c? if that is a losing trade it's pretty bad
+      const LAYER_OFFSETS = [-0.03, -0.02, -0.01, 0.0];
+      const LAYER_SIZES = [40, 40, 20, 10];
       const MIN_LATE_LAYER_EV = 0.03;
 
       console.log(
@@ -748,6 +750,6 @@ cron.schedule(`*/${interval} * * * * *`, async () => {
 });
 
 cron.schedule("0 */20 * * * *", () => {
-  console.log("\n[VOL] Reloading btc_sigma_1m.json (2h refresh)...");
+  console.log("\n[VOL] Reloading btc_sigma_1m.json...");
   sigmaConfig = loadSigmaConfig();
 });
