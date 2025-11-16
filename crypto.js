@@ -39,10 +39,10 @@ const ASSETS = [
 
 // Max shares per 15m market *per asset*
 const MAX_SHARES_PER_MARKET = {
-  BTC: 400,
-  ETH: 400,
-  SOL: 400,
-  XRP: 400,
+  BTC: 600,
+  ETH: 300,
+  SOL: 300,
+  XRP: 200,
 };
 
 // Time / z thresholds & sanity checks
