@@ -489,9 +489,7 @@ async function execForAsset(asset) {
   const pUp = normCdf(z);
   const pDown = 1 - pUp;
 
-  console.log(`[${asset.symbol}] min z-score:`, Z_MIN.toFixed(3));
-  console.log(`[${asset.symbol}] z-score:`, z.toFixed(3));
-  console.log(`[${asset.symbol}] Model P(Up):`, pUp.toFixed(4), `| Model P(Down):`, pDown.toFixed(4));
+  console.log(`[${asset.symbol}] z-score:`, z.toFixed(3), `Model P(Up):`, pUp.toFixed(4), `| Model P(Down):`, pDown.toFixed(4));
 
   const zMaxDynamic = dynamicZMax(minsLeft);
   const absZ = Math.abs(z);
