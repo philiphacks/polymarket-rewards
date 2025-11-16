@@ -9,6 +9,9 @@ import fs from "fs";
 // ---------- GLOBAL CONFIG ----------
 let interval = 5; // seconds between runs
 
+// Succinct logging config
+const LOG_JSON_SUMMARY = false; // set to true for JSON META lines instead of human text
+
 // Per-asset config (Polymarket + Pyth)
 const ASSETS = [
   {
@@ -49,12 +52,14 @@ const MAX_SHARES_PER_MARKET = {
 const MINUTES_LEFT = 3;    // only act in last X minutes (unless |z| big)
 const MIN_EDGE_EARLY = 0.07;  // minsLeft > MINUTES_LEFT
 const MIN_EDGE_LATE  = 0.05;  // minsLeft <= MINUTES_LEFT
-const Z_MIN = 0.5;         // min |z| to even consider directional trade
-// const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
+const Z_MIN = 0.5;            // min |z| to even consider directional trade
+
+// Dynamic Z_MAX
 const Z_MAX_FAR_MINUTES = 10;
 const Z_MAX_NEAR_MINUTES = 3;
 const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
+
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
 
 // CLOB / signing
@@ -74,10 +79,7 @@ function loadSigmaConfig() {
   try {
     const raw = fs.readFileSync("btc_sigma_1m.json", "utf8");
     const parsed = JSON.parse(raw);
-    console.log(
-      "[VOL] Loaded sigma file keys:",
-      Object.keys(parsed)
-    );
+    console.log("[VOL] Loaded sigma file keys:", Object.keys(parsed));
     return parsed;
   } catch (err) {
     console.error("[VOL] Failed to load btc_sigma_1m.json:", err);
@@ -162,7 +164,6 @@ function dynamicZMax(minsLeft) {
 // helper to check if we can place an order given caps
 function canPlaceOrder(state, slug, side, size, assetSymbol) {
   const totalCap = getMaxSharesForMarket(assetSymbol);
-
   const totalBefore = state.sharesBoughtBySlug[slug] || 0;
 
   const pos = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
@@ -276,7 +277,7 @@ function getExistingSide(state, slug) {
   return null; // roughly flat
 }
 
-// **NEW**: helper to bump side position after trade
+// helper to bump side position after trade
 function addPosition(state, slug, side, size) {
   if (!state.sideSharesBySlug[slug]) {
     state.sideSharesBySlug[slug] = { UP: 0, DOWN: 0 };
@@ -298,6 +299,89 @@ function requiredLateProb(secsLeft) {
 
   // linear interpolation: pHigh -> pLow
   return pHigh + (pLow - pHigh) * t;
+}
+
+// ---------- SUMMARY LOGGER ----------
+
+function logSummary(symbol, meta) {
+  const {
+    minsLeft,
+    startPrice,
+    currentPrice,
+    z,
+    pUp,
+    pDown,
+    sigmaPerMin,
+    zMaxDynamic,
+    decision,
+    reason,
+    existingSide,
+    book,
+    evSide,
+    evPrice,
+    evSize,
+    lateSide,
+    layers,
+  } = meta;
+
+  if (LOG_JSON_SUMMARY) {
+    console.log(
+      `[${symbol}] META ` +
+      JSON.stringify({
+        t_mins: Number(minsLeft.toFixed(3)),
+        start: Number(startPrice.toFixed(6)),
+        cur: Number(currentPrice.toFixed(6)),
+        z: Number(z.toFixed(4)),
+        pUp: Number(pUp.toFixed(4)),
+        pDown: Number(pDown.toFixed(4)),
+        sigma1m: Number(sigmaPerMin.toFixed(4)),
+        zMax: Number(zMaxDynamic.toFixed(4)),
+        decision,
+        reason,
+        existingSide,
+        book,
+        ev: evSide
+          ? { side: evSide, price: evPrice, size: evSize }
+          : null,
+        late: lateSide
+          ? { side: lateSide, layers }
+          : null,
+      })
+    );
+  } else {
+    let line =
+      `[${symbol}] t-${minsLeft.toFixed(1)}m` +
+      ` start=${startPrice.toFixed(2)}` +
+      ` cur=${currentPrice.toFixed(2)}` +
+      ` z=${z.toFixed(2)}` +
+      ` pUp=${pUp.toFixed(3)}` +
+      ` pDn=${pDown.toFixed(3)}` +
+      ` σ1m=${sigmaPerMin.toFixed(3)}` +
+      ` Zmax=${zMaxDynamic.toFixed(2)}` +
+      ` side=${existingSide || "FLAT"}` +
+      ` → ${decision}`;
+
+    if (reason) line += ` (${reason})`;
+
+    if (book && (book.upAsk != null || book.downAsk != null)) {
+      const upStr = book.upAsk != null ? book.upAsk.toFixed(3) : "null";
+      const dnStr = book.downAsk != null ? book.downAsk.toFixed(3) : "null";
+      line += ` | asks U/D=${upStr}/${dnStr}`;
+    }
+
+    if (evSide && evPrice != null && evSize) {
+      line += ` | EV ${evSide}@${evPrice.toFixed(2)}x${evSize}`;
+    }
+
+    if (lateSide && layers && layers.length > 0) {
+      const ls = layers
+        .map(l => `${l.price.toFixed(2)}x${l.size}`)
+        .join(", ");
+      line += ` | LATE ${lateSide} [${ls}]`;
+    }
+
+    console.log(line);
+  }
 }
 
 // ---------- PER-ASSET STATE ----------
@@ -344,8 +428,6 @@ async function execForAsset(asset) {
 
   const { slug, cryptoPriceUrl, gammaUrl } = state;
 
-  console.log(`\n\n===== ${asset.symbol} | slug=${slug} =====`);
-
   // 1) Fetch/cached market meta from Gamma
   if (!state.marketMeta || state.marketMeta.slug !== slug) {
     const gammaRes = await fetch(gammaUrl);
@@ -365,7 +447,7 @@ async function execForAsset(asset) {
       question: market.question,
       endMs,
       tokenIds,
-      endDate: market.endDate
+      endDate: market.endDate,
     };
 
     console.log(
@@ -373,13 +455,9 @@ async function execForAsset(asset) {
     );
   }
 
-  const { question, endMs, endDate, tokenIds } = state.marketMeta;
+  const { endMs, tokenIds } = state.marketMeta;
   const nowMs = Date.now();
   const minsLeft = Math.max((endMs - nowMs) / 60000, 0.001);
-
-  console.log(`[${asset.symbol}] Question:`, question);
-  console.log(`[${asset.symbol}] End date:`, endDate);
-  console.log(`[${asset.symbol}] Minutes left:`, minsLeft.toFixed(3));
 
   if (minsLeft > 14) return;
 
@@ -392,20 +470,14 @@ async function execForAsset(asset) {
     return;
   }
 
-  // 2) Fetch start price (openPrice) from Polymarket crypto-price API
-  //    with simple per-asset-per-slug cache
+  // 2) Fetch start price (openPrice) from Polymarket crypto-price API (cached)
   let startPrice;
-
   if (
     state.cpData &&
-    Number.isFinite(Number(state.cpData.openPrice)) && 
+    Number.isFinite(Number(state.cpData.openPrice)) &&
     Number(state.cpData.openPrice) > 0
   ) {
     startPrice = Number(state.cpData.openPrice);
-    console.log(
-      `[${asset.symbol}] Using CACHED start price (openPrice):`,
-      startPrice
-    );
   } else {
     const cpRes = await fetch(cryptoPriceUrl);
 
@@ -439,10 +511,6 @@ async function execForAsset(asset) {
     };
 
     startPrice = candidate;
-    console.log(
-      `[${asset.symbol}] Start price (openPrice) fetched & cached:`,
-      startPrice
-    );
   }
 
   // 3) Fetch current price from Pyth Hermes (per-asset feed ID)
@@ -467,7 +535,6 @@ async function execForAsset(asset) {
     return;
   }
   const currentPrice = raw * Math.pow(10, expo);
-  console.log(`[${asset.symbol}] Current price (Pyth):`, currentPrice);
 
   // Sanity check: Polymarket vs Pyth
   const relDiff = Math.abs(currentPrice - startPrice) / startPrice;
@@ -481,30 +548,13 @@ async function execForAsset(asset) {
 
   // 4) Compute probability Up using per-asset σ
   const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
-  console.log(`[${asset.symbol}] Got σ ${SIGMA_PER_MIN} (1 stdev)`);
   const sigmaT = SIGMA_PER_MIN * Math.sqrt(minsLeft);
   const diff = currentPrice - startPrice;
   const z = diff / sigmaT;
   const pUp = normCdf(z);
   const pDown = 1 - pUp;
 
-  console.log(`[${asset.symbol}] min z-score:`, Z_MIN.toFixed(3));
-  console.log(`[${asset.symbol}] z-score:`, z.toFixed(3));
-  console.log(`[${asset.symbol}] Model P(Up):`, pUp.toFixed(4));
-  console.log(`[${asset.symbol}] Model P(Down):`, pDown.toFixed(4));
-
   const zMaxDynamic = dynamicZMax(minsLeft);
-  console.log(
-    `[${asset.symbol}] dynamic Z_MAX (minsLeft=${minsLeft.toFixed(2)}): ${zMaxDynamic.toFixed(3)}`
-  );
-
-  // If |z| small AND still early → no trade
-  if ((Math.abs(z) < zMaxDynamic || Math.abs(z) > 5) && minsLeft > MINUTES_LEFT) {
-    console.log(
-      `[${asset.symbol}] Earlier than ${MINUTES_LEFT} mins left and |z| not huge. No trade yet.`
-    );
-    return;
-  }
 
   // 5) Order books
   const upTokenId = tokenIds[0];
@@ -518,61 +568,66 @@ async function execForAsset(asset) {
   const { bestAsk: upAsk } = getBestBidAsk(upBook);
   const { bestAsk: downAsk } = getBestBidAsk(downBook);
 
+  // Per-tick summary accumulator
+  const existingSide = getExistingSide(state, slug);
+  const summary = {
+    minsLeft,
+    startPrice,
+    currentPrice,
+    z,
+    pUp,
+    pDown,
+    sigmaPerMin: SIGMA_PER_MIN,
+    zMaxDynamic,
+    decision: "NO_TRADE",
+    reason: "",
+    existingSide,
+    book: {
+      upAsk: upAsk ?? null,
+      downAsk: downAsk ?? null,
+    },
+    evSide: null,
+    evPrice: null,
+    evSize: null,
+    lateSide: null,
+    layers: [],
+  };
+
   if (upAsk == null && downAsk == null) {
-    console.log(`[${asset.symbol}] No asks on either side. No trade.`);
+    summary.decision = "NO_TRADE";
+    summary.reason = "no_asks";
+    logSummary(asset.symbol, summary);
     return;
   }
 
-  const mid =
-    upAsk != null && downAsk != null ? (upAsk + downAsk) / 2 : upAsk ?? downAsk;
-  console.log(
-    `[${asset.symbol}] Up ask / Down ask: ${upAsk?.toFixed(
-      3
-    )} / ${downAsk?.toFixed(3)}, mid≈${mid?.toFixed(3)}`
-  );
+  // Early filter on |z| & time
+  if ((Math.abs(z) < zMaxDynamic || Math.abs(z) > 5) && minsLeft > MINUTES_LEFT) {
+    summary.decision = "NO_TRADE";
+    summary.reason = "early_small_z";
+    logSummary(asset.symbol, summary);
+    return;
+  }
 
-  const existingSide = getExistingSide(state, slug);
-  console.log(
-    `[${asset.symbol}] Existing net side: ${existingSide || "FLAT"}`
-  );
-
-  // Directional buy-only logic (same as before)
+  // Directional buy-only logic (EV candidates)
   let candidates = [];
 
   if (z >= Z_MIN && upAsk != null) {
     const evBuyUp = pUp - upAsk;
-    console.log(
-      `[${asset.symbol}] Up ask=${upAsk.toFixed(
-        3
-      )}, EV buy Up (pUp - ask)= ${evBuyUp.toFixed(4)}`
-    );
     candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
-  } else {
-    console.log(`[${asset.symbol}] We don't buy Up here (z too small or no ask).`);
   }
 
   if (z <= -Z_MIN && downAsk != null) {
     const evBuyDown = pDown - downAsk;
-    console.log(
-      `[${asset.symbol}] Down ask=${downAsk.toFixed(
-        3
-      )}, EV buy Down (pDown - ask)= ${evBuyDown.toFixed(4)}`
-    );
     candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
-  } else {
-    console.log(
-      `[${asset.symbol}] We don't buy Down here (|z| too small or no ask).`
-    );
   }
 
   // Filter by EV threshold
   const minEdge = minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE;
   candidates = candidates.filter((c) => c.ev > minEdge);
 
-  // ---------- Late-game "all-in-ish" mode ----------
+  // ---------- Late-game layered mode ----------
   if (Math.abs(z) > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001)) {
     const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
-
     const secsLeft = minsLeft * 60;
     const pReq = requiredLateProb(secsLeft);
 
@@ -590,62 +645,33 @@ async function execForAsset(asset) {
       sideAsk = downAsk || 0.99;
     }
 
-    if (!lateSide || sideAsk == null) {
-      console.log(`[${asset.symbol}] Late game: no eligible side/ask.`);
-    } else {
+    if (lateSide && sideAsk != null) {
       // Hybrid layered model
-      // Target layer "anchor" prices in probability space.
-      // We will clamp them against current best ask and EV checks.
-      // const LAYER_ANCHORS = [0.96, 0.98, 0.99];
       const LAYER_OFFSETS = [-0.03, -0.01, 0.0];
       const LAYER_SIZES = [40, 40, 20];
-      const MIN_LATE_LAYER_EV = 0.03;
+      // const MIN_LATE_LAYER_EV = 0.03; // currently unused (could be turned on again)
 
-      console.log(
-        `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
-        `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`
-      );
+      const layersPlaced = [];
 
       for (let i = 0; i < LAYER_OFFSETS.length; i++) {
-        // Start from the larger of: current best ask, layer anchor
         let target = sideAsk + LAYER_OFFSETS[i];
         target = Math.max(0.01, Math.min(target, 0.99));
 
         const ev = sideProb - target;
-        // if (ev < MIN_LATE_LAYER_EV) {
-        //   console.log(
-        //     `[${asset.symbol}] Layer ${i}: skip @${target.toFixed(
-        //       2
-        //     )} (EV=${ev.toFixed(4)} < ${MIN_LATE_LAYER_EV}).`
-        //   );
-        //   continue;
-        // }
 
         let layerSize = LAYER_SIZES[i];
-        const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
+        const capCheck = canPlaceOrder(
+          state,
+          slug,
+          lateSide,
+          layerSize,
+          asset.symbol
+        );
         if (!capCheck.ok) {
-          console.log(
-            `[${asset.symbol}] Skipping layer ${i}; cap hit and not hedging. ` +
-            `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
-            `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
-          );
           continue;
         }
 
-        if (capCheck.reason === "hedge_beyond_cap") {
-          console.log(
-            `[${asset.symbol}] Layer ${i} allowed beyond cap because it reduces net exposure. ` +
-            `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
-          );
-        }
-
         const limitPrice = Number(target.toFixed(2));
-
-        console.log(
-          `[${asset.symbol}] Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, ` +
-          `size=${layerSize}, EV=${ev.toFixed(4)}`
-        );
-
         const tokenID = lateSide === "UP" ? upTokenId : downTokenId;
 
         try {
@@ -661,10 +687,14 @@ async function execForAsset(asset) {
             OrderType.GTD
           );
 
-          console.log(`[${asset.symbol}] LATE LAYER ${i} RESP:`, resp);
-          state.sharesBoughtBySlug[slug] =
-            (state.sharesBoughtBySlug[slug] || 0) + layerSize;
+          // You still have the raw response for debugging if needed:
+          // console.log(`[${asset.symbol}] LATE LAYER ${i} RESP:`, resp);
+
+          const currentShares = state.sharesBoughtBySlug[slug] || 0;
+          state.sharesBoughtBySlug[slug] = currentShares + layerSize;
           addPosition(state, slug, lateSide, layerSize);
+
+          layersPlaced.push({ price: limitPrice, size: layerSize, ev });
         } catch (err) {
           console.log(
             `[${asset.symbol}] Error placing late layer ${i}:`,
@@ -672,14 +702,23 @@ async function execForAsset(asset) {
           );
         }
       }
+
+      if (layersPlaced.length > 0) {
+        summary.decision = "LATE_LAYERS";
+        summary.reason = `late_layers_${lateSide.toLowerCase()}`;
+        summary.lateSide = lateSide;
+        summary.layers = layersPlaced;
+      }
     }
   }
 
   // ---------- Normal EV-based entries ----------
   if (candidates.length === 0) {
-    console.log(
-      `[${asset.symbol}] No trade: no side with enough edge in the right direction.`
-    );
+    if (summary.decision === "NO_TRADE") {
+      summary.decision = "NO_TRADE";
+      summary.reason = "no_ev_candidate";
+    }
+    logSummary(asset.symbol, summary);
     return;
   }
 
@@ -687,25 +726,13 @@ async function execForAsset(asset) {
   const size = 100;
   const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
   if (!capCheck.ok) {
-    console.log(
-      `[${asset.symbol}] Skipping EV buy; cap hit and not hedging. ` +
-      `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
-      `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
-    );
+    if (summary.decision === "NO_TRADE") {
+      summary.decision = "NO_TRADE";
+      summary.reason = "cap_hit_not_hedge";
+    }
+    logSummary(asset.symbol, summary);
     return;
   }
-  if (capCheck.reason === "hedge_beyond_cap") {
-    console.log(
-      `[${asset.symbol}] EV buy allowed beyond total cap because it reduces net exposure. ` +
-      `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
-    );
-  }
-
-  console.log(
-    `[${asset.symbol}] >>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
-      3
-    )}, EV=${best.ev.toFixed(4)}, size=${size}`
-  );
 
   const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
   const resp = await client.createAndPostOrder(
@@ -720,11 +747,23 @@ async function execForAsset(asset) {
     OrderType.GTD
   );
 
-  console.log(`[${asset.symbol}] ORDER RESP:`, resp);
+  // console.log(`[${asset.symbol}] ORDER RESP:`, resp);
+
   const currentShares = state.sharesBoughtBySlug[slug] || 0;
   state.sharesBoughtBySlug[slug] = currentShares + size;
   addPosition(state, slug, best.side, size);
-  addPosition(state, slug, best.side, size);
+
+  summary.decision =
+    summary.decision === "LATE_LAYERS" ? "LATE+EV_BUY" : "EV_BUY";
+  summary.reason =
+    summary.decision === "EV_BUY"
+      ? `ev_${best.side.toLowerCase()}`
+      : `${summary.reason}_and_ev_${best.side.toLowerCase()}`;
+  summary.evSide = best.side;
+  summary.evPrice = best.ask;
+  summary.evSize = size;
+
+  logSummary(asset.symbol, summary);
 }
 
 // ---------- MAIN SCHEDULER ----------
@@ -741,7 +780,7 @@ async function execAll() {
 
 cron.schedule(`*/${interval} * * * * *`, async () => {
   await execAll().catch((err) => {
-    console.error('Fatal error in main():', err);
+    console.error("Fatal error in main():", err);
     process.exit(1);
   });
 });
