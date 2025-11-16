@@ -747,7 +747,7 @@ cron.schedule(`*/${interval} * * * * *`, async () => {
   });
 });
 
-cron.schedule("0 0 */1 * * *", () => {
+cron.schedule("0 */20 * * * *", () => {
   console.log("\n[VOL] Reloading btc_sigma_1m.json (2h refresh)...");
   sigmaConfig = loadSigmaConfig();
 });
