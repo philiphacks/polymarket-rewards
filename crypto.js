@@ -602,7 +602,8 @@ async function execForAsset(asset) {
       // TODO: should we ever bid 99c? if that is a losing trade it's pretty bad
       const LAYER_OFFSETS = [-0.03, -0.02, -0.01, 0.0];
       const LAYER_SIZES = [40, 40, 20, 10];
-      const MIN_LATE_LAYER_EV = 0.03;
+      // const MIN_LATE_LAYER_EV = 0.03;
+      const LAYER_MIN_EV  = [0.015, 0.010, 0.005, 0.000];  // 1.5c, 1c, 0.5c, >=0
 
       console.log(
         `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
@@ -615,11 +616,12 @@ async function execForAsset(asset) {
         target = Math.max(0.01, Math.min(target, 0.99));
 
         const ev = sideProb - target;
-        if (ev < MIN_LATE_LAYER_EV) {
+        const minEv = LAYER_MIN_EV[i];
+        if (ev < minEv) {
           console.log(
             `[${asset.symbol}] Layer ${i}: skip @${target.toFixed(
               2
-            )} (EV=${ev.toFixed(4)} < ${MIN_LATE_LAYER_EV}).`
+            )} (EV=${ev.toFixed(4)} < ${minEv}).`
           );
           continue;
         }
