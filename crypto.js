@@ -47,8 +47,8 @@ const MAX_SHARES_PER_MARKET = {
 
 // Time / z thresholds & sanity checks
 const MINUTES_LEFT = 3;    // only act in last X minutes (unless |z| big)
-const MIN_EDGE_EARLY = 0.10;  // minsLeft > MINUTES_LEFT
-const MIN_EDGE_LATE  = 0.08;  // minsLeft <= MINUTES_LEFT
+const MIN_EDGE_EARLY = 0.05;  // minsLeft > MINUTES_LEFT
+const MIN_EDGE_LATE  = 0.03;  // minsLeft <= MINUTES_LEFT
 const Z_MIN = 0.5;         // min |z| to even consider directional trade
 // const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
 const Z_MAX_FAR_MINUTES = 6;
@@ -243,10 +243,10 @@ function sleep(ms) {
 // Get per-asset sigma
 function getSigmaPerMinUSD(volKey) {
   const floorByAsset = {
-    "BTC": 50,
-    "ETH": 3.0,
-    "SOL": 0.15,
-    "XRP": 0.0025,
+    "BTC": 45,
+    "ETH": 2.5,
+    "SOL": 0.125,
+    "XRP": 0.002,
   };
 
   const assets = sigmaConfig.assets || {};
@@ -509,8 +509,8 @@ async function execForAsset(asset) {
   // If |z| small AND still early → no trade
   if (
     minsLeft > 5 ||                        // too early, always skip
-    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, z not huge
-    (minsLeft <= MINUTES_LEFT && absZ < Z_MIN)               // ≤3m, z not big enough
+    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < zMaxDynamic) || // 3–5m, z not huge
+    (minsLeft <= MINUTES_LEFT && absZ < zMaxDynamic)               // ≤3m, z not big enough
   ) {
     const evUp = upAsk != null ? pUp - upAsk : 0;
     const evDown = downAsk != null ? pDown - downAsk : 0;
