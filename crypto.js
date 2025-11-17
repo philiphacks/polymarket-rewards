@@ -344,6 +344,68 @@ function getMaxSharesForMarket(volKey) {
   return MAX_SHARES_PER_MARKET[volKey] || 500;
 }
 
+// Smart sizing based on EV and time left
+function sizeForTrade(ev, minsLeft, opts = {}) {
+  // Use your existing edge thresholds
+  const { minEdgeOverride = null } = opts;
+
+  // Use global thresholds unless an override is provided
+  const minEdge =
+    minEdgeOverride !== null
+      ? minEdgeOverride
+      : minsLeft > MINUTES_LEFT
+      ? MIN_EDGE_EARLY
+      : MIN_EDGE_LATE;
+
+  // Safety: if we don't clear min edge, size = 0 (caller can skip trade)
+  if (ev <= minEdge) return 0;
+
+  // --- EV normalisation ------------------------------------
+  // We don't want EV -> infinite size; cap what we treat as "max EV"
+  // Example: anything above ~18% edge is treated as "max"
+  const EV_CAP = 0.18;
+  const evClamped = Math.min(ev, EV_CAP);
+
+  // Guard: avoid division by zero if someone sets EV_CAP == minEdge
+  const effectiveMax = Math.max(EV_CAP, minEdge + 0.01);
+
+  // Normalised EV: 0 when just above minEdge, 1 when near EV_CAP
+  const evNorm = Math.min(
+    1,
+    (evClamped - minEdge) / (effectiveMax - minEdge)
+  );
+
+  // --- Time factor ------------------------------------------
+  // Only care about the active decision window [0, MINUTES_LEFT]
+  // minsLeft > MINUTES_LEFT is clamped down
+  const clampedMins = Math.max(0, Math.min(MINUTES_LEFT, minsLeft));
+
+  // timeNorm: 0 at MINUTES_LEFT (start of window), 1 at 0 (expiry)
+  const timeNorm = 1 - clampedMins / MINUTES_LEFT;
+
+  // Map time into a factor between ~0.7x and ~1.3x
+  const timeFactor = 0.7 + 0.6 * timeNorm; // 0.7 .. 1.3
+
+  // --- Base size band ---------------------------------------
+  // Baseline trade size band before time scaling
+  const BASE_MIN = 40;   // smallest size when barely above edge
+  const BASE_MAX = 120;  // largest size before timeFactor
+
+  let size = BASE_MIN + evNorm * (BASE_MAX - BASE_MIN);
+
+  // Apply time urgency
+  size *= timeFactor;
+
+  // --- Global per-trade sanity --------------------------------
+  const ABS_MAX = 200;  // safety hard cap for per-trade size
+  size = Math.min(size, ABS_MAX);
+
+  // Round to nearest 10 shares for clean book
+  size = Math.round(size / 10) * 10;
+
+  return size;
+}
+
 // ---------- CORE EXECUTION PER ASSET ----------
 async function execForAsset(asset) {
   const state = ensureState(asset);
@@ -688,7 +750,7 @@ async function execForAsset(asset) {
       // const LAYER_OFFSETS = [-0.03, -0.02, -0.01, 0.0];
       // const MIN_LATE_LAYER_EV = 0.03;
       const LAYER_OFFSETS = [-0.02, -0.01, 0, +0.01];
-      const LAYER_SIZES = [40, 40, 20, 10];
+      // const LAYER_SIZES = [40, 40, 20, 10];
       // const LAYER_MIN_EV  = [0.011, 0.010, 0.005, 0.000];
       const LAYER_MIN_EV = [0.008, 0.006, 0.004, 0.000];
       // const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
@@ -714,7 +776,17 @@ async function execForAsset(asset) {
           continue;
         }
 
-        let layerSize = LAYER_SIZES[i];
+        // let layerSize = LAYER_SIZES[i];
+        const layerSize = sizeForTrade(ev, minsLeft, { minEdgeOverride: 0.0 });
+        if (layerSize <= 0) {
+          console.log(
+            `[${asset.symbol}] Late layer ${i}: size <= 0 (ev=${ev.toFixed(
+              4
+            )}), skipping.`
+          );
+          continue;
+        }
+
         const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
         if (!capCheck.ok) {
           console.log(
@@ -777,7 +849,17 @@ async function execForAsset(asset) {
   }
 
   const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
-  const size = 100;
+  const size = sizeForTrade(best.ev, minsLeft);
+
+  if (size <= 0) {
+    console.log(
+      `[${asset.symbol}] No trade: EV sizing returned 0 (ev=${best.ev.toFixed(
+        4
+      )}, minsLeft=${minsLeft.toFixed(2)})`
+    );
+    return;
+  }
+
   const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
   if (!capCheck.ok) {
     console.log(
