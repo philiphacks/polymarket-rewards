@@ -53,7 +53,13 @@ const Z_MIN = 0.5;         // min |z| to even consider directional trade
 // const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
 const Z_MAX_FAR_MINUTES = 6;
 const Z_MAX_NEAR_MINUTES = 3;
-const Z_HUGE = 3.0;
+
+const Z_HUGE = 4.0;
+const LATE_GAME_EXTREME_SECS = 8;  // **NEW** only consider extreme mode in last 8 seconds
+const LATE_GAME_MAX_FRACTION = 0.3; // **NEW** max 30% of per-market cap in extreme mode
+const LATE_GAME_MIN_EV = 0.01;     // **NEW** require at least 1% edge in extreme mode
+const LATE_GAME_MAX_PRICE = 0.98;  // **NEW** don't pay above 0.98 even in extreme mode
+
 const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
 const MAX_REL_DIFF = 0.05; // 5% sanity check between start & current price
@@ -594,6 +600,85 @@ async function execForAsset(asset) {
     if (!lateSide || sideAsk == null) {
       console.log(`[${asset.symbol}] Late game: no eligible side/ask.`);
     } else {
+      // ========= EXTREME-SIGNAL BIG BET MODE (NEW) =========
+      const extremeSignal =
+        absZ >= Z_HUGE &&                         // huge z-score
+        secsLeft <= LATE_GAME_EXTREME_SECS &&     // last N seconds only
+        sideAsk <= LATE_GAME_MAX_PRICE &&         // don't cross above 0.98
+        (sideProb - sideAsk) >= LATE_GAME_MIN_EV; // require decent EV
+      if (extremeSignal) {
+        const maxShares = getMaxSharesForMarket(asset.symbol);
+        let bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION);
+
+        // Respect caps using your existing canPlaceOrder
+        while (bigSize > 0) {
+          const extremeCapCheck = canPlaceOrder(
+            state,
+            slug,
+            lateSide,
+            bigSize,
+            asset.symbol
+          );
+
+          if (extremeCapCheck.ok) {
+            if (extremeCapCheck.reason === "hedge_beyond_cap") {
+              console.log(
+                `[${asset.symbol}] EXTREME: hedge beyond cap allowed ` +
+                `(net ${extremeCapCheck.netBefore} -> ${extremeCapCheck.netAfter}, ` +
+                `total ${extremeCapCheck.totalBefore} -> ${extremeCapCheck.totalAfter})`
+              );
+            }
+
+            const limitPrice = Number(
+              Math.min(sideAsk, LATE_GAME_MAX_PRICE).toFixed(2)
+            );
+
+            console.log(
+              `[${asset.symbol}] EXTREME SIGNAL: BUY ${lateSide} @ ${limitPrice}, ` +
+              `size=${bigSize}, p=${sideProb.toFixed(4)}, EV=${(sideProb - limitPrice).toFixed(4)}, ` +
+              `z=${z.toFixed(3)}, secsLeft=${secsLeft.toFixed(2)}`
+            );
+
+            const tokenID = lateSide === "UP" ? upTokenId : downTokenId;
+
+            try {
+              const resp = await client.createAndPostOrder(
+                {
+                  tokenID,
+                  price: limitPrice,
+                  side: Side.BUY,
+                  size: bigSize,
+                  expiration: String(expiresAt),
+                },
+                { tickSize: "0.01", negRisk: false },
+                OrderType.GTD
+              );
+
+              console.log(`[${asset.symbol}] EXTREME ORDER RESP:`, resp);
+              state.sharesBoughtBySlug[slug] =
+                (state.sharesBoughtBySlug[slug] || 0) + bigSize;
+              addPosition(state, slug, lateSide, bigSize);
+            } catch (err) {
+              console.log(
+                `[${asset.symbol}] Error placing EXTREME order:`,
+                err?.message || err
+              );
+            }
+
+            // After an extreme bet, we skip the normal layered logic
+            return;
+          }
+
+          // If we can't place the full bigSize, try half until it's 0 or ok
+          bigSize = Math.floor(bigSize / 2);
+        }
+
+        console.log(
+          `[${asset.symbol}] EXTREME: could not find size that respects caps. Falling back to normal late-game layers.`
+        );
+      }
+      // ========= END EXTREME-SIGNAL MODE (NEW) =========
+
       // Hybrid layered model
       // Target layer "anchor" prices in probability space.
       // We will clamp them against current best ask and EV checks.
