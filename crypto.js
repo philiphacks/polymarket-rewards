@@ -600,10 +600,12 @@ async function execForAsset(asset) {
       // const LAYER_ANCHORS = [0.96, 0.98, 0.99];
 
       // TODO: should we ever bid 99c? if that is a losing trade it's pretty bad
-      const LAYER_OFFSETS = [-0.03, -0.02, -0.01, 0.0];
-      const LAYER_SIZES = [40, 40, 20, 10];
+      // const LAYER_OFFSETS = [-0.03, -0.02, -0.01, 0.0];
       // const MIN_LATE_LAYER_EV = 0.03;
-      const LAYER_MIN_EV  = [0.011, 0.010, 0.005, 0.000];  // 1.1c, 1c, 0.5c, >=0
+      const LAYER_OFFSETS = [-0.02, -0.01, 0, +0.01];
+      const LAYER_SIZES = [40, 40, 20, 10];
+      // const LAYER_MIN_EV  = [0.011, 0.010, 0.005, 0.000];  // 1.1c, 1c, 0.5c, >=0
+      const LAYER_MIN_EV = [0.008, 0.006, 0.004, 0.000];
 
       console.log(
         `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
