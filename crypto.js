@@ -587,6 +587,49 @@ async function execForAsset(asset) {
     console.log(`[${asset.symbol}] No asks on either side. No trade.`);
     return;
   }
+  if ((state.sharesBoughtBySlug[slug] || 0) > 0) {
+    const pos = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
+    const upPos   = pos.UP   || 0;
+    const downPos = pos.DOWN || 0;
+
+    // Only log if we *actually* hold that side
+    const THRESH_WEAK = 0.55;  // model no longer likes this side much
+    const THRESH_BAD  = 0.50;  // model says this side is outright <50%
+
+    const upAskStr   = upAsk   != null ? upAsk.toFixed(3)   : "n/a";
+    const downAskStr = downAsk != null ? downAsk.toFixed(3) : "n/a";
+
+    // Optional: only care once we’re inside some time window (e.g. last 4 minutes)
+    const inDecisionWindow = minsLeft <= 4;
+
+    if (upPos > 0 && inDecisionWindow) {
+      if (pUp < THRESH_BAD) {
+        console.log(
+          `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (STRONG): holding ${upPos} UP ` +
+          `but pUp=${pUp.toFixed(4)} (<${THRESH_BAD}), bestUpAsk=${upAskStr}`
+        );
+      } else if (pUp < THRESH_WEAK) {
+        console.log(
+          `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (WEAK): holding ${upPos} UP ` +
+          `but pUp=${pUp.toFixed(4)} (<${THRESH_WEAK}), bestUpAsk=${upAskStr}`
+        );
+      }
+    }
+
+    if (downPos > 0 && inDecisionWindow) {
+      if (pDown < THRESH_BAD) {
+        console.log(
+          `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (STRONG): holding ${downPos} DOWN ` +
+          `but pDown=${pDown.toFixed(4)} (<${THRESH_BAD}), bestDownAsk=${downAskStr}`
+        );
+      } else if (pDown < THRESH_WEAK) {
+        console.log(
+          `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (WEAK): holding ${downPos} DOWN ` +
+          `but pDown=${pDown.toFixed(4)} (<${THRESH_WEAK}), bestDownAsk=${downAskStr}`
+        );
+      }
+    }
+  }
 
   const zMaxDynamic = dynamicZMax(minsLeft);
   const absZ = Math.abs(z);
