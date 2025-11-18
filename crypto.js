@@ -344,6 +344,18 @@ function getMaxSharesForMarket(volKey) {
   return MAX_SHARES_PER_MARKET[volKey] || 500;
 }
 
+function isInSlamWindow(date = new Date()) {
+  const hours = date.getUTCHours();
+  const mins  = date.getUTCMinutes();
+
+  // Simple UTC window: 14:40–15:05
+  const totalMins = hours * 60 + mins;
+  const start = 14 * 60 + 40; // 14:40
+  const end   = 15 * 60 + 5;  // 15:05
+
+  return totalMins >= start && totalMins <= end;
+}
+
 // Smart sizing based on EV and time left
 function sizeForTrade(ev, minsLeft, opts = {}) {
   // Use your existing edge thresholds
@@ -458,6 +470,11 @@ async function execForAsset(asset) {
     console.log(`[${asset.symbol}] Interval over. Resetting in 30s...`);
     await sleep(30_000);
     resetStateForAsset(asset);
+    return;
+  }
+
+  if (isInSlamWindow()) {
+    console.log(`[${asset.symbol}] In slam window (9:45–10:00 ET). Skipping this interval.`);
     return;
   }
 
