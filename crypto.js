@@ -467,7 +467,7 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
   return size;
 }
 
-// ---------- PURE DECISION FUNCTION (Step B) ----------
+// ---------- PURE DECISION FUNCTION (Step B - core EV) ----------
 // Mirrors the *normal EV-based entries* logic, but PURE:
 //  - no state mutation
 //  - no network or file IO
@@ -485,7 +485,7 @@ function decideTrade(snapshot) {
   const absZ = Math.abs(z);
   const zMaxDynamic = dynamicZMax(minsLeft);
 
-  // Same gating as your live code's time/z gate
+  // Same gating as live code's time/z gate
   if (
     minsLeft > 5 ||                                        // too early, always skip
     (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, only trade if |z| >= Z_HUGE
@@ -540,6 +540,173 @@ function decideTrade(snapshot) {
     ev: best.ev,
     riskBand,
   };
+}
+
+// ---------- PURE DECISION FUNCTION (Step B - extreme late) ----------
+// Pure version of the EXTREME-SIGNAL BIG BET mode.
+// Ignores inventory/caps; just says "this tick would want an extreme bet" or null.
+function decideExtremeLate(snapshot) {
+  const {
+    symbol,
+    minsLeft,
+    z,
+    pUp,
+    pDown,
+    upAsk,
+    downAsk,
+  } = snapshot;
+
+  const absZ = Math.abs(z);
+  const zMaxDynamic = dynamicZMax(minsLeft);
+
+  // Same entry window as live: only inside late-game region
+  if (!(absZ > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001))) {
+    return null;
+  }
+
+  const secsLeft = minsLeft * 60;
+  const pReq = requiredLateProb(secsLeft);
+
+  let lateSide = null;
+  let sideProb = null;
+  let sideAsk = null;
+
+  if (pUp >= pReq && z > Z_MIN_LATE && upAsk != null) {
+    lateSide = "UP";
+    sideProb = pUp;
+    sideAsk = upAsk;
+  } else if (pDown >= pReq && z < -Z_MIN_LATE && downAsk != null) {
+    lateSide = "DOWN";
+    sideProb = pDown;
+    sideAsk = downAsk;
+  }
+
+  if (!lateSide || sideAsk == null) {
+    return null;
+  }
+
+  const extremeSignal =
+    absZ >= Z_HUGE &&
+    secsLeft <= LATE_GAME_EXTREME_SECS &&
+    sideAsk <= LATE_GAME_MAX_PRICE &&
+    (sideProb - sideAsk) >= LATE_GAME_MIN_EV;
+
+  if (!extremeSignal) {
+    return null;
+  }
+
+  const maxShares = getMaxSharesForMarket(symbol);
+  let bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION);
+  if (bigSize <= 0) {
+    return null;
+  }
+
+  const limitPrice = Number(
+    Math.min(sideAsk, LATE_GAME_MAX_PRICE).toFixed(2)
+  );
+  const ev = sideProb - limitPrice;
+  if (ev <= 0) {
+    return null;
+  }
+
+  return {
+    kind: "extreme",
+    side: lateSide,
+    size: bigSize,
+    price: limitPrice,
+    ev,
+    p: sideProb,
+    z,
+    secsLeft,
+  };
+}
+
+// ---------- PURE DECISION FUNCTION (Step B - late layers) ----------
+// Pure version of late-game layered bids:
+// returns an array of intended layer orders (0–4), ignoring caps/inventory.
+function decideLateLayers(snapshot) {
+  const {
+    minsLeft,
+    z,
+    pUp,
+    pDown,
+    upAsk,
+    downAsk,
+  } = snapshot;
+
+  const absZ = Math.abs(z);
+  const zMaxDynamic = dynamicZMax(minsLeft);
+
+  if (!(absZ > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001))) {
+    return [];
+  }
+
+  const secsLeft = minsLeft * 60;
+  const pReq = requiredLateProb(secsLeft);
+
+  let lateSide = null;
+  let sideProb = null;
+  let sideAsk = null;
+
+  if (pUp >= pReq && z > Z_MIN_LATE && upAsk != null) {
+    lateSide = "UP";
+    sideProb = pUp;
+    sideAsk = upAsk;
+  } else if (pDown >= pReq && z < -Z_MIN_LATE && downAsk != null) {
+    lateSide = "DOWN";
+    sideProb = pDown;
+    sideAsk = downAsk;
+  }
+
+  if (!lateSide || sideAsk == null) {
+    return [];
+  }
+
+  const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
+  const LAYER_MIN_EV = [0.008, 0.006, 0.004, 0.000];
+
+  const orders = [];
+
+  for (let i = 0; i < LAYER_OFFSETS.length; i++) {
+    let target = sideAsk + LAYER_OFFSETS[i];
+    target = Math.max(0.01, Math.min(target, 0.99));
+
+    const ev = sideProb - target;
+    const minEv = LAYER_MIN_EV[i];
+    if (ev < minEv) {
+      continue;
+    }
+
+    let layerRiskBand = "medium";
+    if (sideProb >= PROB_MIN_CORE && target >= PRICE_MIN_CORE) {
+      layerRiskBand = "core";
+    } else if (sideProb <= PROB_MAX_RISKY && target <= PRICE_MAX_RISKY) {
+      layerRiskBand = "risky";
+    }
+
+    const size = sizeForTrade(ev, minsLeft, {
+      minEdgeOverride: 0.0,
+      riskBand: layerRiskBand,
+    });
+
+    if (size <= 0) {
+      continue;
+    }
+
+    const limitPrice = Number(target.toFixed(2));
+
+    orders.push({
+      kind: "layer",
+      layerIndex: i,
+      side: lateSide,
+      size,
+      price: limitPrice,
+      ev,
+      riskBand: layerRiskBand,
+    });
+  }
+
+  return orders;
 }
 
 // ---------- CORE EXECUTION PER ASSET ----------
@@ -1118,14 +1285,14 @@ async function execForAsset(asset) {
     )}, EV=${best.ev.toFixed(4)}, size=${size}, riskBand=${riskBand}`
   );
 
-  const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
+  const expiresAt2 = Math.floor(Date.now() / 1000) + 15 * 60;
   const resp = await client.createAndPostOrder(
     {
       tokenID: best.side === "UP" ? upTokenId : downTokenId,
       price: best.ask.toFixed(2),
       side: Side.BUY,
       size,
-      expiration: String(expiresAt),
+      expiration: String(expiresAt2),
     },
     { tickSize: "0.01", negRisk: false },
     OrderType.GTD
