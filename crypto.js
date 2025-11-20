@@ -51,7 +51,6 @@ const MIN_EDGE_EARLY = 0.05; // minsLeft > MINUTES_LEFT
 const MIN_EDGE_LATE  = 0.03; // minsLeft <= MINUTES_LEFT
 
 // z-thresholds
-const Z_MIN = 0.5;          // legacy, still used in some checks
 const Z_MIN_EARLY = 1.2;    // directional entries ≥ 3m left
 const Z_MIN_LATE  = 0.7;    // in the last 2–3m we accept smaller z if EV is big
 
