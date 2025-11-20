@@ -5,3 +5,5 @@ notes.md
 btc_sigma_1m.json
 *.log
 *.csv
+.DS_Store
+*.jsonl
