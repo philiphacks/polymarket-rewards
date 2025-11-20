@@ -46,19 +46,30 @@ const MAX_SHARES_PER_MARKET = {
 };
 
 // Time / z thresholds & sanity checks
-const MINUTES_LEFT = 3;    // only act in last X minutes (unless |z| big)
-const MIN_EDGE_EARLY = 0.05;  // minsLeft > MINUTES_LEFT
-const MIN_EDGE_LATE  = 0.03;  // minsLeft <= MINUTES_LEFT
-const Z_MIN = 0.5;         // min |z| to even consider directional trade
-// const Z_MAX = 1.7;         // if |z| >= this, ignore MINUTES_LEFT condition
+const MINUTES_LEFT = 3;      // only act in last X minutes (unless |z| big)
+const MIN_EDGE_EARLY = 0.05; // minsLeft > MINUTES_LEFT
+const MIN_EDGE_LATE  = 0.03; // minsLeft <= MINUTES_LEFT
+
+// z-thresholds
+const Z_MIN = 0.5;          // legacy, still used in some checks
+const Z_MIN_EARLY = 1.2;    // directional entries ≥ 3m left
+const Z_MIN_LATE  = 0.7;    // in the last 2–3m we accept smaller z if EV is big
+
 const Z_MAX_FAR_MINUTES = 6;
 const Z_MAX_NEAR_MINUTES = 3;
 
+// Extreme late-game constants
 const Z_HUGE = 4.0;
-const LATE_GAME_EXTREME_SECS = 8;  // **NEW** only consider extreme mode in last 8 seconds
-const LATE_GAME_MAX_FRACTION = 0.3; // **NEW** max 30% of per-market cap in extreme mode
-const LATE_GAME_MIN_EV = 0.01;     // **NEW** require at least 1% edge in extreme mode
-const LATE_GAME_MAX_PRICE = 0.98;  // **NEW** don't pay above 0.98 even in extreme mode
+const LATE_GAME_EXTREME_SECS = 8;   // only consider extreme mode in last 8 seconds
+const LATE_GAME_MAX_FRACTION = 0.3; // max 30% of per-market cap in extreme mode
+const LATE_GAME_MIN_EV = 0.01;      // require at least 1% edge in extreme mode
+const LATE_GAME_MAX_PRICE = 0.98;   // don't pay above 0.98 even in extreme mode
+
+// Risk band thresholds
+const PRICE_MIN_CORE = 0.90;   // only "core" strategy if paying ≥90c
+const PROB_MIN_CORE  = 0.97;   // and model prob ≥97%
+const PRICE_MAX_RISKY = 0.90;  // "risky" if cheaper than 90c
+const PROB_MAX_RISKY  = 0.95;  // and prob ≤95%
 
 const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
@@ -92,7 +103,7 @@ function loadSigmaConfig() {
   }
 }
 
-// **NEW** mutable sigmaConfig that can be reloaded
+// mutable sigmaConfig that can be reloaded
 let sigmaConfig = loadSigmaConfig();
 console.log("Loaded sigma file keys:", Object.keys(sigmaConfig));
 
@@ -249,10 +260,10 @@ function sleep(ms) {
 // Get per-asset sigma
 function getSigmaPerMinUSD(volKey) {
   const floorByAsset = {
-    "BTC": 45,
-    "ETH": 2.5,
-    "SOL": 0.125,
-    "XRP": 0.002,
+    "BTC": 70,   // was 45
+    "ETH": 4.0,  // was 2.5
+    "SOL": 0.20, // was 0.125
+    "XRP": 0.0035,
   };
 
   const assets = sigmaConfig.assets || {};
@@ -283,7 +294,7 @@ function getExistingSide(state, slug) {
   return null; // roughly flat
 }
 
-// **NEW**: helper to bump side position after trade
+// helper to bump side position after trade
 function addPosition(state, slug, side, size) {
   if (!state.sideSharesBySlug[slug]) {
     state.sideSharesBySlug[slug] = { UP: 0, DOWN: 0 };
@@ -344,22 +355,21 @@ function getMaxSharesForMarket(volKey) {
   return MAX_SHARES_PER_MARKET[volKey] || 500;
 }
 
+// Approximate US "slam" window: ~9:45–10:00 ET (14:45–15:00 UTC in Nov)
 function isInSlamWindow(date = new Date()) {
   const hours = date.getUTCHours();
   const mins  = date.getUTCMinutes();
 
-  // Simple UTC window: 14:40–15:05
   const totalMins = hours * 60 + mins;
-  const start = 14 * 60 + 40; // 14:40
-  const end   = 15 * 60 + 5;  // 15:05
+  const start = 14 * 60 + 45; // 14:45 UTC
+  const end   = 15 * 60;      // 15:00 UTC
 
-  return totalMins >= start && totalMins <= end;
+  return totalMins >= start && totalMins < end;
 }
 
-// Smart sizing based on EV and time left
+// Smart sizing based on EV, time left, and risk band
 function sizeForTrade(ev, minsLeft, opts = {}) {
-  // Use your existing edge thresholds
-  const { minEdgeOverride = null } = opts;
+  const { minEdgeOverride = null, riskBand: riskBandOpt = "medium" } = opts;
 
   // Use global thresholds unless an override is provided
   const minEdge =
@@ -372,10 +382,27 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
   // Safety: if we don't clear min edge, size = 0 (caller can skip trade)
   if (ev <= minEdge) return 0;
 
+  // --- Base caps by risk band --------------------------------
+  let BASE_MIN, BASE_MAX, ABS_MAX, EV_CAP;
+  if (riskBandOpt === "core") {
+    BASE_MIN = 60;
+    BASE_MAX = 180;
+    ABS_MAX  = 250;
+    EV_CAP   = 0.18;
+  } else if (riskBandOpt === "risky") {
+    BASE_MIN = 10;
+    BASE_MAX = 40;
+    ABS_MAX  = 60;
+    EV_CAP   = 0.08;
+  } else {
+    // "medium"
+    BASE_MIN = 40;
+    BASE_MAX = 120;
+    ABS_MAX  = 160;
+    EV_CAP   = 0.12;
+  }
+
   // --- EV normalisation ------------------------------------
-  // We don't want EV -> infinite size; cap what we treat as "max EV"
-  // Example: anything above ~18% edge is treated as "max"
-  const EV_CAP = 0.18;
   const evClamped = Math.min(ev, EV_CAP);
 
   // Guard: avoid division by zero if someone sets EV_CAP == minEdge
@@ -389,7 +416,6 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
 
   // --- Time factor ------------------------------------------
   // Only care about the active decision window [0, MINUTES_LEFT]
-  // minsLeft > MINUTES_LEFT is clamped down
   const clampedMins = Math.max(0, Math.min(MINUTES_LEFT, minsLeft));
 
   // timeNorm: 0 at MINUTES_LEFT (start of window), 1 at 0 (expiry)
@@ -399,17 +425,12 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
   const timeFactor = 0.7 + 0.6 * timeNorm; // 0.7 .. 1.3
 
   // --- Base size band ---------------------------------------
-  // Baseline trade size band before time scaling
-  const BASE_MIN = 40;   // smallest size when barely above edge
-  const BASE_MAX = 120;  // largest size before timeFactor
-
   let size = BASE_MIN + evNorm * (BASE_MAX - BASE_MIN);
 
   // Apply time urgency
   size *= timeFactor;
 
   // --- Global per-trade sanity --------------------------------
-  const ABS_MAX = 200;  // safety hard cap for per-trade size
   size = Math.min(size, ABS_MAX);
 
   // Round to nearest 10 shares for clean book
@@ -474,12 +495,13 @@ async function execForAsset(asset) {
   }
 
   if (isInSlamWindow()) {
-    console.log(`[${asset.symbol}] In slam window (9:45–10:00 ET). Skipping this interval.`);
+    console.log(
+      `[${asset.symbol}] In slam window (~9:45–10:00 ET). Skipping this interval.`
+    );
     return;
   }
 
   // 2) Fetch start price (openPrice) from Polymarket crypto-price API
-  //    with simple per-asset-per-slug cache
   let startPrice;
 
   if (
@@ -549,7 +571,9 @@ async function execForAsset(asset) {
     return;
   }
   const currentPrice = raw * Math.pow(10, expo);
-  console.log(`[${asset.symbol}] Open price $${startPrice.toFixed(5)} vs current price (Pyth) $${currentPrice.toFixed(5)}`);
+  console.log(
+    `[${asset.symbol}] Open price $${startPrice.toFixed(5)} vs current price (Pyth) $${currentPrice.toFixed(5)}`
+  );
 
   // Sanity check: Polymarket vs Pyth
   const relDiff = Math.abs(currentPrice - startPrice) / startPrice;
@@ -569,7 +593,9 @@ async function execForAsset(asset) {
   const pUp = normCdf(z);
   const pDown = 1 - pUp;
 
-  console.log(`[${asset.symbol}] σ ${SIGMA_PER_MIN.toFixed(5)}`, `| z-score:`, z.toFixed(3), `| Model P(Up):`, pUp.toFixed(4), `| Model P(Down):`, pDown.toFixed(4));
+  console.log(
+    `[${asset.symbol}] σ ${SIGMA_PER_MIN.toFixed(5)} | z-score: ${z.toFixed(3)} | Model P(Up): ${pUp.toFixed(4)} | Model P(Down): ${pDown.toFixed(4)}`
+  );
 
   // 5) Order books
   const upTokenId = tokenIds[0];
@@ -587,19 +613,19 @@ async function execForAsset(asset) {
     console.log(`[${asset.symbol}] No asks on either side. No trade.`);
     return;
   }
+
+  // Countersignal logging (no selling yet)
   if ((state.sharesBoughtBySlug[slug] || 0) > 0) {
     const pos = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
     const upPos   = pos.UP   || 0;
     const downPos = pos.DOWN || 0;
 
-    // Only log if we *actually* hold that side
-    const THRESH_WEAK = 0.55;  // model no longer likes this side much
-    const THRESH_BAD  = 0.50;  // model says this side is outright <50%
+    const THRESH_WEAK = 0.55;
+    const THRESH_BAD  = 0.50;
 
     const upAskStr   = upAsk   != null ? upAsk.toFixed(3)   : "n/a";
     const downAskStr = downAsk != null ? downAsk.toFixed(3) : "n/a";
 
-    // Optional: only care once we’re inside some time window (e.g. last 4 minutes)
     const inDecisionWindow = minsLeft <= 4;
 
     if (upPos > 0 && inDecisionWindow) {
@@ -634,20 +660,20 @@ async function execForAsset(asset) {
   const zMaxDynamic = dynamicZMax(minsLeft);
   const absZ = Math.abs(z);
 
-  // If |z| small AND still early → no trade
+  // Time/z gate: don't even consider trades in bad regions
   if (
-    minsLeft > 5 ||                        // too early, always skip
-    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < zMaxDynamic) || // 3–5m, z not huge
-    (minsLeft <= MINUTES_LEFT && absZ < Z_MIN)               // ≤3m, z not big enough
+    minsLeft > 5 ||                                        // too early, always skip
+    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, only trade if |z| >= Z_HUGE
+    (minsLeft <= MINUTES_LEFT && absZ < Z_MIN_LATE)        // ≤3m, require at least Z_MIN_LATE
   ) {
     const evUp = upAsk != null ? pUp - upAsk : 0;
     const evDown = downAsk != null ? pDown - downAsk : 0;
     console.log(
       `[${asset.symbol}] Skip: minsLeft=${minsLeft.toFixed(2)}, |z|=${absZ.toFixed(
         3
-      )}, Z_HUGE=${Z_HUGE}, Z_MAXdyn=${zMaxDynamic.toFixed(3)}, 
-      EV buy Up (pUp - ask) = ${evUp.toFixed(4)}, 
-      EV buy Down (pDown - ask)= ${evDown.toFixed(4)}`
+      )}, Z_HUGE=${Z_HUGE}, Z_MAXdyn=${zMaxDynamic.toFixed(3)}, ` +
+      `EV buy Up (pUp - ask) = ${evUp.toFixed(4)}, ` +
+      `EV buy Down (pDown - ask)= ${evDown.toFixed(4)}`
     );
     return;
   }
@@ -665,10 +691,11 @@ async function execForAsset(asset) {
     `[${asset.symbol}] Existing net side: ${existingSide || "FLAT"}`
   );
 
-  // Directional buy-only logic (same as before)
+  // Directional buy-only logic
+  const directionalZMin = minsLeft > MINUTES_LEFT ? Z_MIN_EARLY : Z_MIN_LATE;
   let candidates = [];
 
-  if (z >= Z_MIN && upAsk != null) {
+  if (z >= directionalZMin && upAsk != null) {
     const evBuyUp = pUp - upAsk;
     console.log(
       `[${asset.symbol}] Up ask=${upAsk.toFixed(
@@ -677,10 +704,12 @@ async function execForAsset(asset) {
     );
     candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
   } else {
-    console.log(`[${asset.symbol}] We don't buy Up here (z too small or no ask).`);
+    console.log(
+      `[${asset.symbol}] We don't buy Up here (z too small or no ask).`
+    );
   }
 
-  if (z <= -Z_MIN && downAsk != null) {
+  if (z <= -directionalZMin && downAsk != null) {
     const evBuyDown = pDown - downAsk;
     console.log(
       `[${asset.symbol}] Down ask=${downAsk.toFixed(
@@ -709,11 +738,11 @@ async function execForAsset(asset) {
     let sideProb = null;
     let sideAsk = null;
 
-    if (pUp >= pReq && z > Z_MIN) {
+    if (pUp >= pReq && z > Z_MIN_LATE) {
       lateSide = "UP";
       sideProb = pUp;
       sideAsk = upAsk || 0.99;
-    } else if (pDown >= pReq && z < -Z_MIN) {
+    } else if (pDown >= pReq && z < -Z_MIN_LATE) {
       lateSide = "DOWN";
       sideProb = pDown;
       sideAsk = downAsk || 0.99;
@@ -722,17 +751,17 @@ async function execForAsset(asset) {
     if (!lateSide || sideAsk == null) {
       console.log(`[${asset.symbol}] Late game: no eligible side/ask.`);
     } else {
-      // ========= EXTREME-SIGNAL BIG BET MODE (NEW) =========
+      // ========= EXTREME-SIGNAL BIG BET MODE =========
       const extremeSignal =
         absZ >= Z_HUGE &&                         // huge z-score
         secsLeft <= LATE_GAME_EXTREME_SECS &&     // last N seconds only
         sideAsk <= LATE_GAME_MAX_PRICE &&         // don't cross above 0.98
         (sideProb - sideAsk) >= LATE_GAME_MIN_EV; // require decent EV
+
       if (extremeSignal) {
         const maxShares = getMaxSharesForMarket(asset.symbol);
         let bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION);
 
-        // Respect caps using your existing canPlaceOrder
         while (bigSize > 0) {
           const extremeCapCheck = canPlaceOrder(
             state,
@@ -787,11 +816,10 @@ async function execForAsset(asset) {
               );
             }
 
-            // After an extreme bet, we skip the normal layered logic
+            // After an extreme bet, skip the normal layered logic
             return;
           }
 
-          // If we can't place the full bigSize, try half until it's 0 or ok
           bigSize = Math.floor(bigSize / 2);
         }
 
@@ -799,21 +827,11 @@ async function execForAsset(asset) {
           `[${asset.symbol}] EXTREME: could not find size that respects caps. Falling back to normal late-game layers.`
         );
       }
-      // ========= END EXTREME-SIGNAL MODE (NEW) =========
+      // ========= END EXTREME-SIGNAL MODE =========
 
       // Hybrid layered model
-      // Target layer "anchor" prices in probability space.
-      // We will clamp them against current best ask and EV checks.
-      // const LAYER_ANCHORS = [0.96, 0.98, 0.99];
-
-      // TODO: should we ever bid 99c? if that is a losing trade it's pretty bad
-      // const LAYER_OFFSETS = [-0.03, -0.02, -0.01, 0.0];
-      // const MIN_LATE_LAYER_EV = 0.03;
-      const LAYER_OFFSETS = [-0.02, -0.01, 0, +0.01];
-      // const LAYER_SIZES = [40, 40, 20, 10];
-      // const LAYER_MIN_EV  = [0.011, 0.010, 0.005, 0.000];
+      const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
       const LAYER_MIN_EV = [0.008, 0.006, 0.004, 0.000];
-      // const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
 
       console.log(
         `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
@@ -821,7 +839,6 @@ async function execForAsset(asset) {
       );
 
       for (let i = 0; i < LAYER_OFFSETS.length; i++) {
-        // Start from the larger of: current best ask, layer anchor
         let target = sideAsk + LAYER_OFFSETS[i];
         target = Math.max(0.01, Math.min(target, 0.99));
 
@@ -836,8 +853,19 @@ async function execForAsset(asset) {
           continue;
         }
 
-        // let layerSize = LAYER_SIZES[i];
-        const layerSize = sizeForTrade(ev, minsLeft, { minEdgeOverride: 0.0 });
+        // Risk band for this layer based on prob & price
+        let layerRiskBand = "medium";
+        if (sideProb >= PROB_MIN_CORE && target >= PRICE_MIN_CORE) {
+          layerRiskBand = "core";
+        } else if (sideProb <= PROB_MAX_RISKY && target <= PRICE_MAX_RISKY) {
+          layerRiskBand = "risky";
+        }
+
+        const layerSize = sizeForTrade(ev, minsLeft, {
+          minEdgeOverride: 0.0,
+          riskBand: layerRiskBand,
+        });
+
         if (layerSize <= 0) {
           console.log(
             `[${asset.symbol}] Late layer ${i}: size <= 0 (ev=${ev.toFixed(
@@ -847,7 +875,13 @@ async function execForAsset(asset) {
           continue;
         }
 
-        const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
+        const capCheck = canPlaceOrder(
+          state,
+          slug,
+          lateSide,
+          layerSize,
+          asset.symbol
+        );
         if (!capCheck.ok) {
           console.log(
             `[${asset.symbol}] Skipping layer ${i}; cap hit and not hedging. ` +
@@ -909,13 +943,24 @@ async function execForAsset(asset) {
   }
 
   const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
-  const size = sizeForTrade(best.ev, minsLeft);
+
+  const sideProbBest = best.side === "UP" ? pUp : pDown;
+  const bestPrice = best.ask;
+
+  let riskBand = "medium";
+  if (sideProbBest >= PROB_MIN_CORE && bestPrice >= PRICE_MIN_CORE) {
+    riskBand = "core";
+  } else if (sideProbBest <= PROB_MAX_RISKY && bestPrice <= PRICE_MAX_RISKY) {
+    riskBand = "risky";
+  }
+
+  const size = sizeForTrade(best.ev, minsLeft, { riskBand });
 
   if (size <= 0) {
     console.log(
       `[${asset.symbol}] No trade: EV sizing returned 0 (ev=${best.ev.toFixed(
         4
-      )}, minsLeft=${minsLeft.toFixed(2)})`
+      )}, minsLeft=${minsLeft.toFixed(2)}, riskBand=${riskBand})`
     );
     return;
   }
@@ -939,7 +984,7 @@ async function execForAsset(asset) {
   console.log(
     `[${asset.symbol}] >>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
       3
-    )}, EV=${best.ev.toFixed(4)}, size=${size}`
+    )}, EV=${best.ev.toFixed(4)}, size=${size}, riskBand=${riskBand}`
   );
 
   const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
