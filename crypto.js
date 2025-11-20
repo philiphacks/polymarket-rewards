@@ -1,4 +1,6 @@
-// multi_crypto_updown_bot.mjs
+// Version 1.0
+// Since Nov 20th, 7pm CET
+
 import 'dotenv/config';
 import cron from "node-cron";
 import clob from "@polymarket/clob-client";
