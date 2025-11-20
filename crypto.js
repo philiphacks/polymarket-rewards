@@ -368,6 +368,33 @@ function isInSlamWindow(date = new Date()) {
   return totalMins >= start && totalMins < end;
 }
 
+// ---------- JSON TICK LOGGING (Step A) ----------
+// One JSON line per asset per tick, for offline backtesting.
+// This is side-effect-y (file IO) but *not* used in decision logic.
+function logTickSnapshot(snapshot) {
+  try {
+    const d = new Date(snapshot.ts);
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+
+    // Per-day file, all assets together
+    const filename = `ticks-${yyyy}${mm}${dd}.jsonl`;
+
+    fs.appendFile(
+      filename,
+      JSON.stringify(snapshot) + "\n",
+      (err) => {
+        if (err) {
+          console.error("[TICK-LOG] Error appending snapshot:", err);
+        }
+      }
+    );
+  } catch (err) {
+    console.error("[TICK-LOG] Failed to log snapshot:", err);
+  }
+}
+
 // Smart sizing based on EV, time left, and risk band
 function sizeForTrade(ev, minsLeft, opts = {}) {
   const { minEdgeOverride = null, riskBand: riskBandOpt = "medium" } = opts;
@@ -438,6 +465,81 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
   size = Math.round(size / 10) * 10;
 
   return size;
+}
+
+// ---------- PURE DECISION FUNCTION (Step B) ----------
+// Mirrors the *normal EV-based entries* logic, but PURE:
+//  - no state mutation
+//  - no network or file IO
+// Use this in backtests by feeding snapshots from logTickSnapshot().
+function decideTrade(snapshot) {
+  const {
+    minsLeft,
+    z,
+    pUp,
+    pDown,
+    upAsk,
+    downAsk,
+  } = snapshot;
+
+  const absZ = Math.abs(z);
+  const zMaxDynamic = dynamicZMax(minsLeft);
+
+  // Same gating as your live code's time/z gate
+  if (
+    minsLeft > 5 ||                                        // too early, always skip
+    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, only trade if |z| >= Z_HUGE
+    (minsLeft <= MINUTES_LEFT && absZ < Z_MIN_LATE)        // ≤3m, require at least Z_MIN_LATE
+  ) {
+    return null;
+  }
+
+  const directionalZMin = minsLeft > MINUTES_LEFT ? Z_MIN_EARLY : Z_MIN_LATE;
+  let candidates = [];
+
+  if (z >= directionalZMin && upAsk != null) {
+    const evBuyUp = pUp - upAsk;
+    candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
+  }
+
+  if (z <= -directionalZMin && downAsk != null) {
+    const evBuyDown = pDown - downAsk;
+    candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
+  }
+
+  const minEdge = minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE;
+  candidates = candidates.filter((c) => c.ev > minEdge);
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
+
+  const sideProbBest = best.side === "UP" ? pUp : pDown;
+  const bestPrice = best.ask;
+
+  let riskBand = "medium";
+  if (sideProbBest >= PROB_MIN_CORE && bestPrice >= PRICE_MIN_CORE) {
+    riskBand = "core";
+  } else if (sideProbBest <= PROB_MAX_RISKY && bestPrice <= PRICE_MAX_RISKY) {
+    riskBand = "risky";
+  }
+
+  const size = sizeForTrade(best.ev, minsLeft, { riskBand });
+
+  if (size <= 0) {
+    return null;
+  }
+
+  return {
+    kind: "normal",
+    side: best.side,
+    size,
+    price: Number(best.ask.toFixed(2)),
+    ev: best.ev,
+    riskBand,
+  };
 }
 
 // ---------- CORE EXECUTION PER ASSET ----------
@@ -614,6 +716,34 @@ async function execForAsset(asset) {
     console.log(`[${asset.symbol}] No asks on either side. No trade.`);
     return;
   }
+
+  // ---------- Build & log snapshot for backtesting (Step A) ----------
+  {
+    const sharesUp = state.sideSharesBySlug[slug]?.UP || 0;
+    const sharesDown = state.sideSharesBySlug[slug]?.DOWN || 0;
+    const totalShares = state.sharesBoughtBySlug[slug] || 0;
+
+    const snapshot = {
+      ts: Date.now(),
+      symbol: asset.symbol,
+      slug,
+      minsLeft,
+      startPrice,
+      currentPrice,
+      sigmaPerMin: SIGMA_PER_MIN,
+      z,
+      pUp,
+      pDown,
+      upAsk,
+      downAsk,
+      sharesUp,
+      sharesDown,
+      totalShares,
+    };
+
+    logTickSnapshot(snapshot);
+  }
+  // -----------------------------------------------------------
 
   // Countersignal logging (no selling yet)
   if ((state.sharesBoughtBySlug[slug] || 0) > 0) {
