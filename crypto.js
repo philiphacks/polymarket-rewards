@@ -53,7 +53,7 @@ const MIN_EDGE_EARLY = 0.05; // minsLeft > MINUTES_LEFT
 const MIN_EDGE_LATE  = 0.03; // minsLeft <= MINUTES_LEFT
 
 // z-thresholds
-const Z_MIN_EARLY = 1.2;    // directional entries ≥ 3m left
+const Z_MIN_EARLY = 0.9;    // directional entries ≥ 3m left
 const Z_MIN_LATE  = 0.7;    // in the last 2–3m we accept smaller z if EV is big
 
 const Z_MAX_FAR_MINUTES = 6;
@@ -929,7 +929,7 @@ async function execForAsset(asset) {
 
       // Hybrid layered model
       const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
-      const LAYER_MIN_EV = [0.008, 0.006, 0.004, 0.000];
+      const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
 
       console.log(
         `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
