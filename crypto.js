@@ -8,8 +8,37 @@ const { ClobClient, Side, OrderType } = clob;
 import { Wallet } from "@ethersproject/wallet";
 import fs from "fs";
 
+// ---------- LOGGER FN --------------
+function createScopedLogger(symbol) {
+  const logs = [];
+
+  // Helper to format arguments like console.log does
+  const formatArgs = (args) => args.map(arg => {
+    if (typeof arg === 'object') return JSON.stringify(arg);
+    return arg;
+  }).join(' ');
+
+  return {
+    // Replaces console.log
+    log: (...args) => {
+      logs.push(`[${symbol}] ${formatArgs(args)}`);
+    },
+    // Replaces console.error
+    error: (...args) => {
+      logs.push(`[${symbol}] [ERROR] ${formatArgs(args)}`);
+    },
+    // Dumps everything to the real console at once
+    flush: () => {
+      if (logs.length === 0) return;
+      console.log(`\n--- START ${symbol} LOGS ---`);
+      console.log(logs.join('\n'));
+      console.log(`--- END ${symbol} LOGS ---\n`);
+    }
+  };
+}
+
 // ---------- GLOBAL CONFIG ----------
-let interval = 5; // seconds between runs
+let interval = 2; // seconds between runs
 
 // Per-asset config (Polymarket + Pyth)
 const ASSETS = [
@@ -507,613 +536,717 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
 }
 
 // ---------- CORE EXECUTION PER ASSET ----------
-async function execForAsset(asset) {
-  const state = ensureState(asset);
-  if (state.resetting) return;
+async function execForAsset(asset, priceData) {
+  const logger = createScopedLogger(asset.symbol);
 
-  const { slug, cryptoPriceUrl, gammaUrl } = state;
+  try {
+    const state = ensureState(asset);
+    if (state.resetting) return;
 
-  console.log(`\n\n===== ${asset.symbol} | slug=${slug} =====`);
+    const { slug, cryptoPriceUrl, gammaUrl } = state;
 
-  // 1) Fetch/cached market meta from Gamma
-  if (!state.marketMeta || state.marketMeta.slug !== slug) {
-    const gammaRes = await fetch(gammaUrl);
-    if (!gammaRes.ok) {
-      console.log(
-        `[${asset.symbol}] Gamma request failed: ${gammaRes.status} ${gammaRes.statusText}`
-      );
-      return;
-    }
-    const market = await gammaRes.json();
-    const endMs = new Date(market.endDate).getTime();
-    const tokenIds = JSON.parse(market.clobTokenIds);
+    logger.log(`\n\n===== ${asset.symbol} | slug=${slug} =====`);
 
-    state.marketMeta = {
-      id: market.id,
-      slug,
-      question: market.question,
-      endMs,
-      tokenIds,
-      endDate: market.endDate
-    };
-
-    console.log(
-      `[${asset.symbol}] Cached marketMeta for slug=${slug}, id=${market.id}`
-    );
-  }
-
-  const { question, endMs, endDate, tokenIds } = state.marketMeta;
-  const nowMs = Date.now();
-  const minsLeft = Math.max((endMs - nowMs) / 60000, 0.001);
-
-  console.log(`[${asset.symbol}] Question:`, question);
-  console.log(`[${asset.symbol}] End date:`, endDate);
-  console.log(`[${asset.symbol}] Minutes left:`, minsLeft.toFixed(3));
-
-  if (minsLeft > 14) return;
-
-  // If market basically over, wait a bit and reset to next 15m market
-  if (minsLeft < 0.01) {
-    state.resetting = true;
-    console.log(`[${asset.symbol}] Interval over. Resetting in 30s...`);
-    await sleep(30_000);
-    resetStateForAsset(asset);
-    return;
-  }
-
-  if (isInSlamWindow()) {
-    console.log(
-      `[${asset.symbol}] In slam window (~9:45–10:00 ET). Skipping this interval.`
-    );
-    return;
-  }
-
-  // 2) Fetch start price (openPrice) from Polymarket crypto-price API
-  let startPrice;
-
-  if (
-    state.cpData &&
-    Number.isFinite(Number(state.cpData.openPrice)) && 
-    Number(state.cpData.openPrice) > 0
-  ) {
-    startPrice = Number(state.cpData.openPrice);
-  } else {
-    const cpRes = await fetch(cryptoPriceUrl);
-
-    if (cpRes.status === 429) {
-      console.log(
-        `[${asset.symbol}] crypto-price 429 (rate limited). Sleeping 3s and skipping this tick.`
-      );
-      await sleep(3000);
-      return;
-    }
-
-    if (!cpRes.ok) {
-      console.log(
-        `[${asset.symbol}] crypto-price failed: ${cpRes.status} ${cpRes.statusText}`
-      );
-      return;
-    }
-    const cp = await cpRes.json();
-    const candidate = Number(cp.openPrice);
-
-    if (!Number.isFinite(candidate) || candidate <= 0) {
-      console.log(
-        `[${asset.symbol}] openPrice missing / non-numeric / non-positive (=${cp.openPrice}). Not caching; skipping this tick.`
-      );
-      return;
-    }
-
-    state.cpData = {
-      ...cp,
-      _cachedAt: Date.now(),
-    };
-
-    startPrice = candidate;
-    console.log(
-      `[${asset.symbol}] Start price (openPrice) fetched & cached:`,
-      startPrice
-    );
-  }
-
-  // 3) Fetch current price from Pyth Hermes (per-asset feed ID)
-  const pythUrl =
-    "https://hermes.pyth.network/api/latest_price_feeds?ids[]=" + asset.pythId;
-
-  const pythRes = await fetch(pythUrl);
-  if (!pythRes.ok) {
-    console.log(
-      `[${asset.symbol}] Pyth request failed: ${pythRes.status} ${pythRes.statusText}`
-    );
-    return;
-  }
-  const pythArr = await pythRes.json();
-  const pyth0 = pythArr[0];
-  const pythPriceObj = pyth0.price;
-
-  const raw = Number(pythPriceObj.price);
-  const expo = Number(pythPriceObj.expo);
-  if (!Number.isFinite(raw) || !Number.isFinite(expo)) {
-    console.log(`[${asset.symbol}] Pyth price/expo missing`);
-    return;
-  }
-  const currentPrice = raw * Math.pow(10, expo);
-  console.log(
-    `[${asset.symbol}] Open price $${startPrice.toFixed(5)} vs current price (Pyth) $${currentPrice.toFixed(5)}`
-  );
-
-  // Sanity check: Polymarket vs Pyth
-  const relDiff = Math.abs(currentPrice - startPrice) / startPrice;
-  if (relDiff > MAX_REL_DIFF) {
-    console.log(
-      `[${asset.symbol}] Price sanity FAILED (>${MAX_REL_DIFF * 100}%). Skipping.`,
-      { startPrice, currentPrice, relDiff }
-    );
-    return;
-  }
-
-  // 4) Compute probability Up using *effective* per-asset σ
-  //    - base sigma comes from volKey (e.g. "BTC/USD")
-  //    - effectiveSigmaPerMin shrinks it in the last seconds
-  // const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
-  const SIGMA_PER_MIN = effectiveSigmaPerMin(asset.symbol, minsLeft);
-  const sigmaT = SIGMA_PER_MIN * Math.sqrt(minsLeft);
-  const diff = currentPrice - startPrice;
-  const z = diff / sigmaT;
-  const pUp = normCdf(z);
-  const pDown = 1 - pUp;
-
-  console.log(
-    `[${asset.symbol}] σ ${SIGMA_PER_MIN.toFixed(5)} | z-score: ${z.toFixed(3)} | Model P(Up): ${pUp.toFixed(4)} | Model P(Down): ${pDown.toFixed(4)}`
-  );
-
-  // 5) Order books
-  const upTokenId = tokenIds[0];
-  const downTokenId = tokenIds[1];
-
-  const [upBook, downBook] = await Promise.all([
-    client.getOrderBook(upTokenId),
-    client.getOrderBook(downTokenId),
-  ]);
-
-  const { bestAsk: upAsk } = getBestBidAsk(upBook);
-  const { bestAsk: downAsk } = getBestBidAsk(downBook);
-
-  if (upAsk == null && downAsk == null) {
-    console.log(`[${asset.symbol}] No asks on either side. No trade.`);
-    return;
-  }
-
-  // ---------- Build & log snapshot for backtesting (Step A) ----------
-  {
-    const sharesUp = state.sideSharesBySlug[slug]?.UP || 0;
-    const sharesDown = state.sideSharesBySlug[slug]?.DOWN || 0;
-    const totalShares = state.sharesBoughtBySlug[slug] || 0;
-
-    const snapshot = {
-      ts: Date.now(),
-      symbol: asset.symbol,
-      slug,
-      minsLeft,
-      startPrice,
-      currentPrice,
-      sigmaPerMin: SIGMA_PER_MIN,
-      z,
-      pUp,
-      pDown,
-      upAsk,
-      downAsk,
-      sharesUp,
-      sharesDown,
-      totalShares,
-    };
-
-    logTickSnapshot(snapshot);
-  }
-  // -----------------------------------------------------------
-
-  // Countersignal logging (no selling yet)
-  if ((state.sharesBoughtBySlug[slug] || 0) > 0) {
-    const pos = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
-    const upPos   = pos.UP   || 0;
-    const downPos = pos.DOWN || 0;
-
-    const THRESH_WEAK = 0.55;
-    const THRESH_BAD  = 0.50;
-
-    const upAskStr   = upAsk   != null ? upAsk.toFixed(3)   : "n/a";
-    const downAskStr = downAsk != null ? downAsk.toFixed(3) : "n/a";
-
-    const inDecisionWindow = minsLeft <= 4;
-
-    if (upPos > 0 && inDecisionWindow) {
-      if (pUp < THRESH_BAD) {
-        console.log(
-          `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (STRONG): holding ${upPos} UP ` +
-          `but pUp=${pUp.toFixed(4)} (<${THRESH_BAD}), bestUpAsk=${upAskStr}`
+    // 1) Fetch/cached market meta from Gamma
+    if (!state.marketMeta || state.marketMeta.slug !== slug) {
+      const gammaRes = await fetch(gammaUrl);
+      if (!gammaRes.ok) {
+        logger.log(
+          `[${asset.symbol}] Gamma request failed: ${gammaRes.status} ${gammaRes.statusText}`
         );
-      } else if (pUp < THRESH_WEAK) {
-        console.log(
-          `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (WEAK): holding ${upPos} UP ` +
-          `but pUp=${pUp.toFixed(4)} (<${THRESH_WEAK}), bestUpAsk=${upAskStr}`
-        );
+        return;
       }
+      const market = await gammaRes.json();
+      const endMs = new Date(market.endDate).getTime();
+      const tokenIds = JSON.parse(market.clobTokenIds);
+
+      state.marketMeta = {
+        id: market.id,
+        slug,
+        question: market.question,
+        endMs,
+        tokenIds,
+        endDate: market.endDate
+      };
+
+      logger.log(
+        `[${asset.symbol}] Cached marketMeta for slug=${slug}, id=${market.id}`
+      );
     }
 
-    if (downPos > 0 && inDecisionWindow) {
-      if (pDown < THRESH_BAD) {
-        console.log(
-          `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (STRONG): holding ${downPos} DOWN ` +
-          `but pDown=${pDown.toFixed(4)} (<${THRESH_BAD}), bestDownAsk=${downAskStr}`
-        );
-      } else if (pDown < THRESH_WEAK) {
-        console.log(
-          `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (WEAK): holding ${downPos} DOWN ` +
-          `but pDown=${pDown.toFixed(4)} (<${THRESH_WEAK}), bestDownAsk=${downAskStr}`
-        );
-      }
-    }
-  }
+    const { question, endMs, endDate, tokenIds } = state.marketMeta;
+    const nowMs = Date.now();
+    const minsLeft = Math.max((endMs - nowMs) / 60000, 0.001);
 
-  const zMaxDynamic = dynamicZMax(minsLeft);
-  const absZ = Math.abs(z);
+    logger.log(`[${asset.symbol}] Question:`, question);
+    logger.log(`[${asset.symbol}] End date:`, endDate);
+    logger.log(`[${asset.symbol}] Minutes left:`, minsLeft.toFixed(3));
 
-  // Time/z gate: don't even consider trades in bad regions
-  if (
-    minsLeft > 5 ||                                        // too early, always skip
-    (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, only trade if |z| >= Z_HUGE
-    (minsLeft <= MINUTES_LEFT && absZ < Z_MIN_LATE)        // ≤3m, require at least Z_MIN_LATE
-  ) {
-    const evUp = upAsk != null ? pUp - upAsk : 0;
-    const evDown = downAsk != null ? pDown - downAsk : 0;
-    console.log(
-      `[${asset.symbol}] Skip: minsLeft=${minsLeft.toFixed(2)}, |z|=${absZ.toFixed(
-        3
-      )}, Z_HUGE=${Z_HUGE}, Z_MAXdyn=${zMaxDynamic.toFixed(3)}, ` +
-      `EV buy Up (pUp - ask) = ${evUp.toFixed(4)}, ` +
-      `EV buy Down (pDown - ask)= ${evDown.toFixed(4)}`
-    );
-    return;
-  }
+    if (minsLeft > 14) return;
 
-  const mid =
-    upAsk != null && downAsk != null ? (upAsk + downAsk) / 2 : upAsk ?? downAsk;
-  console.log(
-    `[${asset.symbol}] Up ask / Down ask: ${upAsk?.toFixed(
-      3
-    )} / ${downAsk?.toFixed(3)}, mid≈${mid?.toFixed(3)}`
-  );
-
-  const existingSide = getExistingSide(state, slug);
-  console.log(
-    `[${asset.symbol}] Existing net side: ${existingSide || "FLAT"}`
-  );
-
-  // Directional buy-only logic
-  const directionalZMin = minsLeft > MINUTES_LEFT ? Z_MIN_EARLY : Z_MIN_LATE;
-  let candidates = [];
-
-  if (z >= directionalZMin && upAsk != null) {
-    const evBuyUp = pUp - upAsk;
-    console.log(
-      `[${asset.symbol}] Up ask=${upAsk.toFixed(
-        3
-      )}, EV buy Up (pUp - ask)= ${evBuyUp.toFixed(4)}`
-    );
-    candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
-  } else {
-    console.log(
-      `[${asset.symbol}] We don't buy Up here (z too small or no ask).`
-    );
-  }
-
-  if (z <= -directionalZMin && downAsk != null) {
-    const evBuyDown = pDown - downAsk;
-    console.log(
-      `[${asset.symbol}] Down ask=${downAsk.toFixed(
-        3
-      )}, EV buy Down (pDown - ask)= ${evBuyDown.toFixed(4)}`
-    );
-    candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
-  } else {
-    console.log(
-      `[${asset.symbol}] We don't buy Down here (|z| too small or no ask).`
-    );
-  }
-
-  // Filter by EV threshold
-  const minEdge = minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE;
-  candidates = candidates.filter((c) => c.ev > minEdge);
-
-  // ---------- Late-game "all-in-ish" mode ----------
-  if (Math.abs(z) > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001)) {
-    const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
-
-    const secsLeft = minsLeft * 60;
-    const pReq = requiredLateProb(secsLeft);
-
-    let lateSide = null;
-    let sideProb = null;
-    let sideAsk = null;
-
-    if (pUp >= pReq && z > Z_MIN_LATE) {
-      lateSide = "UP";
-      sideProb = pUp;
-      sideAsk = upAsk || 0.99;
-    } else if (pDown >= pReq && z < -Z_MIN_LATE) {
-      lateSide = "DOWN";
-      sideProb = pDown;
-      sideAsk = downAsk || 0.99;
+    // If market basically over, wait a bit and reset to next 15m market
+    if (minsLeft < 0.01) {
+      state.resetting = true;
+      logger.log(`[${asset.symbol}] Interval over. Resetting in 30s...`);
+      await sleep(30_000);
+      resetStateForAsset(asset);
+      return;
     }
 
-    if (!lateSide || sideAsk == null) {
-      console.log(`[${asset.symbol}] Late game: no eligible side/ask.`);
+    if (isInSlamWindow()) {
+      logger.log(
+        `[${asset.symbol}] In slam window (~9:45–10:00 ET). Skipping this interval.`
+      );
+      return;
+    }
+
+    // 2) Fetch start price (openPrice) from Polymarket crypto-price API
+    let startPrice;
+
+    if (
+      state.cpData &&
+      Number.isFinite(Number(state.cpData.openPrice)) && 
+      Number(state.cpData.openPrice) > 0
+    ) {
+      startPrice = Number(state.cpData.openPrice);
     } else {
-      // ========= EXTREME-SIGNAL BIG BET MODE =========
-      const extremeSignal =
-        absZ >= Z_HUGE &&                         // huge z-score
-        secsLeft <= LATE_GAME_EXTREME_SECS &&     // last N seconds only
-        sideAsk <= LATE_GAME_MAX_PRICE &&         // don't cross above 0.98
-        (sideProb - sideAsk) >= LATE_GAME_MIN_EV; // require decent EV
+      const cpRes = await fetch(cryptoPriceUrl);
 
-      if (extremeSignal) {
-        const maxShares = getMaxSharesForMarket(asset.symbol);
-        let bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION);
+      if (cpRes.status === 429) {
+        logger.log(
+          `[${asset.symbol}] crypto-price 429 (rate limited). Sleeping 3s and skipping this tick.`
+        );
+        await sleep(3000);
+        return;
+      }
 
-        while (bigSize > 0) {
-          const extremeCapCheck = canPlaceOrder(
+      if (!cpRes.ok) {
+        logger.log(
+          `[${asset.symbol}] crypto-price failed: ${cpRes.status} ${cpRes.statusText}`
+        );
+        return;
+      }
+      const cp = await cpRes.json();
+      const candidate = Number(cp.openPrice);
+
+      if (!Number.isFinite(candidate) || candidate <= 0) {
+        logger.log(
+          `[${asset.symbol}] openPrice missing / non-numeric / non-positive (=${cp.openPrice}). Not caching; skipping this tick.`
+        );
+        return;
+      }
+
+      state.cpData = {
+        ...cp,
+        _cachedAt: Date.now(),
+      };
+
+      startPrice = candidate;
+      logger.log(
+        `[${asset.symbol}] Start price (openPrice) fetched & cached:`,
+        startPrice
+      );
+    }
+
+    // 3) Fetch current price from Pyth Hermes (per-asset feed ID)
+    // const pythUrl =
+    //   "https://hermes.pyth.network/api/latest_price_feeds?ids[]=" + asset.pythId;
+
+    // const pythRes = await fetch(pythUrl);
+    // if (!pythRes.ok) {
+    //   logger.log(
+    //     `[${asset.symbol}] Pyth request failed: ${pythRes.status} ${pythRes.statusText}`
+    //   );
+    //   return;
+    // }
+    // const pythArr = await pythRes.json();
+    // const pyth0 = pythArr[0];
+    // const pythPriceObj = pyth0.price;
+
+    // const raw = Number(pythPriceObj.price);
+    // const expo = Number(pythPriceObj.expo);
+    // if (!Number.isFinite(raw) || !Number.isFinite(expo)) {
+    //   logger.log(`[${asset.symbol}] Pyth price/expo missing`);
+    //   return;
+    // }
+    // const currentPrice = raw * Math.pow(10, expo);
+    const currentPrice = priceData.price;
+    logger.log(
+      `[${asset.symbol}] Open price $${startPrice.toFixed(5)} vs current price (Pyth) $${currentPrice.toFixed(5)}`
+    );
+
+    // Sanity check: Polymarket vs Pyth
+    const relDiff = Math.abs(currentPrice - startPrice) / startPrice;
+    if (relDiff > MAX_REL_DIFF) {
+      logger.log(
+        `[${asset.symbol}] Price sanity FAILED (>${MAX_REL_DIFF * 100}%). Skipping.`,
+        { startPrice, currentPrice, relDiff }
+      );
+      return;
+    }
+
+    // 4) Compute probability Up using *effective* per-asset σ
+    //    - base sigma comes from volKey (e.g. "BTC/USD")
+    //    - effectiveSigmaPerMin shrinks it in the last seconds
+    // const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
+    const SIGMA_PER_MIN = effectiveSigmaPerMin(asset.symbol, minsLeft);
+    const sigmaT = SIGMA_PER_MIN * Math.sqrt(minsLeft);
+    const diff = currentPrice - startPrice;
+    const z = diff / sigmaT;
+    const pUp = normCdf(z);
+    const pDown = 1 - pUp;
+
+    logger.log(
+      `[${asset.symbol}] σ ${SIGMA_PER_MIN.toFixed(5)} | z-score: ${z.toFixed(3)} | Model P(Up): ${pUp.toFixed(4)} | Model P(Down): ${pDown.toFixed(4)}`
+    );
+
+    // 5) Order books
+    const upTokenId = tokenIds[0];
+    const downTokenId = tokenIds[1];
+
+    const [upBook, downBook] = await Promise.all([
+      client.getOrderBook(upTokenId),
+      client.getOrderBook(downTokenId),
+    ]);
+
+    const { bestAsk: upAsk } = getBestBidAsk(upBook);
+    const { bestAsk: downAsk } = getBestBidAsk(downBook);
+
+    if (upAsk == null && downAsk == null) {
+      logger.log(`[${asset.symbol}] No asks on either side. No trade.`);
+      return;
+    }
+
+    // ---------- Build & log snapshot for backtesting (Step A) ----------
+    {
+      const sharesUp = state.sideSharesBySlug[slug]?.UP || 0;
+      const sharesDown = state.sideSharesBySlug[slug]?.DOWN || 0;
+      const totalShares = state.sharesBoughtBySlug[slug] || 0;
+
+      const snapshot = {
+        ts: Date.now(),
+        symbol: asset.symbol,
+        slug,
+        minsLeft,
+        startPrice,
+        currentPrice,
+        sigmaPerMin: SIGMA_PER_MIN,
+        z,
+        pUp,
+        pDown,
+        upAsk,
+        downAsk,
+        sharesUp,
+        sharesDown,
+        totalShares,
+      };
+
+      logTickSnapshot(snapshot);
+    }
+    // -----------------------------------------------------------
+
+    // Countersignal logging (no selling yet)
+    if ((state.sharesBoughtBySlug[slug] || 0) > 0) {
+      const pos = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
+      const upPos   = pos.UP   || 0;
+      const downPos = pos.DOWN || 0;
+
+      const THRESH_WEAK = 0.55;
+      const THRESH_BAD  = 0.50;
+
+      const upAskStr   = upAsk   != null ? upAsk.toFixed(3)   : "n/a";
+      const downAskStr = downAsk != null ? downAsk.toFixed(3) : "n/a";
+
+      const inDecisionWindow = minsLeft <= 4;
+
+      if (upPos > 0 && inDecisionWindow) {
+        if (pUp < THRESH_BAD) {
+          logger.log(
+            `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (STRONG): holding ${upPos} UP ` +
+            `but pUp=${pUp.toFixed(4)} (<${THRESH_BAD}), bestUpAsk=${upAskStr}`
+          );
+        } else if (pUp < THRESH_WEAK) {
+          logger.log(
+            `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (WEAK): holding ${upPos} UP ` +
+            `but pUp=${pUp.toFixed(4)} (<${THRESH_WEAK}), bestUpAsk=${upAskStr}`
+          );
+        }
+      }
+
+      if (downPos > 0 && inDecisionWindow) {
+        if (pDown < THRESH_BAD) {
+          logger.log(
+            `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (STRONG): holding ${downPos} DOWN ` +
+            `but pDown=${pDown.toFixed(4)} (<${THRESH_BAD}), bestDownAsk=${downAskStr}`
+          );
+        } else if (pDown < THRESH_WEAK) {
+          logger.log(
+            `[${asset.symbol}][${slug}] >>> COUNTERSIGNAL (WEAK): holding ${downPos} DOWN ` +
+            `but pDown=${pDown.toFixed(4)} (<${THRESH_WEAK}), bestDownAsk=${downAskStr}`
+          );
+        }
+      }
+    }
+
+    const zMaxDynamic = dynamicZMax(minsLeft);
+    const absZ = Math.abs(z);
+
+    // Time/z gate: don't even consider trades in bad regions
+    if (
+      minsLeft > 5 ||                                        // too early, always skip
+      (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, only trade if |z| >= Z_HUGE
+      (minsLeft <= MINUTES_LEFT && absZ < Z_MIN_LATE)        // ≤3m, require at least Z_MIN_LATE
+    ) {
+      const evUp = upAsk != null ? pUp - upAsk : 0;
+      const evDown = downAsk != null ? pDown - downAsk : 0;
+      logger.log(
+        `[${asset.symbol}] Skip: minsLeft=${minsLeft.toFixed(2)}, |z|=${absZ.toFixed(
+          3
+        )}, Z_HUGE=${Z_HUGE}, Z_MAXdyn=${zMaxDynamic.toFixed(3)}, ` +
+        `EV buy Up (pUp - ask) = ${evUp.toFixed(4)}, ` +
+        `EV buy Down (pDown - ask)= ${evDown.toFixed(4)}`
+      );
+      return;
+    }
+
+    const mid =
+      upAsk != null && downAsk != null ? (upAsk + downAsk) / 2 : upAsk ?? downAsk;
+    logger.log(
+      `[${asset.symbol}] Up ask / Down ask: ${upAsk?.toFixed(
+        3
+      )} / ${downAsk?.toFixed(3)}, mid≈${mid?.toFixed(3)}`
+    );
+
+    const existingSide = getExistingSide(state, slug);
+    logger.log(
+      `[${asset.symbol}] Existing net side: ${existingSide || "FLAT"}`
+    );
+
+    // Directional buy-only logic
+    const directionalZMin = minsLeft > MINUTES_LEFT ? Z_MIN_EARLY : Z_MIN_LATE;
+    let candidates = [];
+
+    if (z >= directionalZMin && upAsk != null) {
+      const evBuyUp = pUp - upAsk;
+      logger.log(
+        `[${asset.symbol}] Up ask=${upAsk.toFixed(
+          3
+        )}, EV buy Up (pUp - ask)= ${evBuyUp.toFixed(4)}`
+      );
+      candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
+    } else {
+      logger.log(
+        `[${asset.symbol}] We don't buy Up here (z too small or no ask).`
+      );
+    }
+
+    if (z <= -directionalZMin && downAsk != null) {
+      const evBuyDown = pDown - downAsk;
+      logger.log(
+        `[${asset.symbol}] Down ask=${downAsk.toFixed(
+          3
+        )}, EV buy Down (pDown - ask)= ${evBuyDown.toFixed(4)}`
+      );
+      candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
+    } else {
+      logger.log(
+        `[${asset.symbol}] We don't buy Down here (|z| too small or no ask).`
+      );
+    }
+
+    // Filter by EV threshold
+    const minEdge = minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE;
+    candidates = candidates.filter((c) => c.ev > minEdge);
+
+    // ---------- Late-game "all-in-ish" mode ----------
+    if (Math.abs(z) > zMaxDynamic || (minsLeft < 2 && minsLeft > 0.001)) {
+      const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
+
+      const secsLeft = minsLeft * 60;
+      const pReq = requiredLateProb(secsLeft);
+
+      let lateSide = null;
+      let sideProb = null;
+      let sideAsk = null;
+
+      if (pUp >= pReq && z > Z_MIN_LATE) {
+        lateSide = "UP";
+        sideProb = pUp;
+        sideAsk = upAsk || 0.99;
+      } else if (pDown >= pReq && z < -Z_MIN_LATE) {
+        lateSide = "DOWN";
+        sideProb = pDown;
+        sideAsk = downAsk || 0.99;
+      }
+
+      if (!lateSide || sideAsk == null) {
+        logger.log(`[${asset.symbol}] Late game: no eligible side/ask.`);
+      } else {
+        // ========= EXTREME-SIGNAL BIG BET MODE =========
+        const extremeSignal =
+          absZ >= Z_HUGE &&                         // huge z-score
+          secsLeft <= LATE_GAME_EXTREME_SECS &&     // last N seconds only
+          sideAsk <= LATE_GAME_MAX_PRICE &&         // don't cross above 0.98
+          (sideProb - sideAsk) >= LATE_GAME_MIN_EV; // require decent EV
+
+        if (extremeSignal) {
+          const maxShares = getMaxSharesForMarket(asset.symbol);
+          let bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION);
+
+          while (bigSize > 0) {
+            const extremeCapCheck = canPlaceOrder(
+              state,
+              slug,
+              lateSide,
+              bigSize,
+              asset.symbol
+            );
+
+            if (extremeCapCheck.ok) {
+              if (extremeCapCheck.reason === "hedge_beyond_cap") {
+                logger.log(
+                  `[${asset.symbol}] EXTREME: hedge beyond cap allowed ` +
+                  `(net ${extremeCapCheck.netBefore} -> ${extremeCapCheck.netAfter}, ` +
+                  `total ${extremeCapCheck.totalBefore} -> ${extremeCapCheck.totalAfter})`
+                );
+              }
+
+              const limitPrice = Number(
+                Math.min(sideAsk, LATE_GAME_MAX_PRICE).toFixed(2)
+              );
+
+              logger.log(
+                `[${asset.symbol}] EXTREME SIGNAL: BUY ${lateSide} @ ${limitPrice}, ` +
+                `size=${bigSize}, p=${sideProb.toFixed(4)}, EV=${(sideProb - limitPrice).toFixed(4)}, ` +
+                `z=${z.toFixed(3)}, secsLeft=${secsLeft.toFixed(2)}`
+              );
+
+              const tokenID = lateSide === "UP" ? upTokenId : downTokenId;
+
+              try {
+                const resp = await client.createAndPostOrder(
+                  {
+                    tokenID,
+                    price: limitPrice,
+                    side: Side.BUY,
+                    size: bigSize,
+                    expiration: String(expiresAt),
+                  },
+                  { tickSize: "0.01", negRisk: false },
+                  OrderType.GTD
+                );
+
+                logger.log(`[${asset.symbol}] EXTREME ORDER RESP:`, resp);
+                state.sharesBoughtBySlug[slug] =
+                  (state.sharesBoughtBySlug[slug] || 0) + bigSize;
+                addPosition(state, slug, lateSide, bigSize);
+              } catch (err) {
+                logger.log(
+                  `[${asset.symbol}] Error placing EXTREME order:`,
+                  err?.message || err
+                );
+              }
+
+              // After an extreme bet, skip the normal layered logic
+              return;
+            }
+
+            bigSize = Math.floor(bigSize / 2);
+          }
+
+          logger.log(
+            `[${asset.symbol}] EXTREME: could not find size that respects caps. Falling back to normal late-game layers.`
+          );
+        }
+        // ========= END EXTREME-SIGNAL MODE =========
+
+        // Hybrid layered model
+        const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
+        const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
+
+        logger.log(
+          `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
+          `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`
+        );
+
+        for (let i = 0; i < LAYER_OFFSETS.length; i++) {
+          let target = sideAsk + LAYER_OFFSETS[i];
+          target = Math.max(0.01, Math.min(target, 0.99));
+
+          const ev = sideProb - target;
+          const minEv = LAYER_MIN_EV[i];
+          if (ev < minEv) {
+            logger.log(
+              `[${asset.symbol}] Layer ${i}: skip @${target.toFixed(
+                2
+              )} (EV=${ev.toFixed(4)} < ${minEv}).`
+            );
+            continue;
+          }
+
+          // Risk band for this layer based on prob & price
+          let layerRiskBand = "medium";
+          if (sideProb >= PROB_MIN_CORE && target >= PRICE_MIN_CORE) {
+            layerRiskBand = "core";
+          } else if (sideProb <= PROB_MAX_RISKY && target <= PRICE_MAX_RISKY) {
+            layerRiskBand = "risky";
+          }
+
+          const layerSize = sizeForTrade(ev, minsLeft, {
+            minEdgeOverride: 0.0,
+            riskBand: layerRiskBand,
+          });
+
+          if (layerSize <= 0) {
+            logger.log(
+              `[${asset.symbol}] Late layer ${i}: size <= 0 (ev=${ev.toFixed(
+                4
+              )}), skipping.`
+            );
+            continue;
+          }
+
+          const capCheck = canPlaceOrder(
             state,
             slug,
             lateSide,
-            bigSize,
+            layerSize,
             asset.symbol
           );
-
-          if (extremeCapCheck.ok) {
-            if (extremeCapCheck.reason === "hedge_beyond_cap") {
-              console.log(
-                `[${asset.symbol}] EXTREME: hedge beyond cap allowed ` +
-                `(net ${extremeCapCheck.netBefore} -> ${extremeCapCheck.netAfter}, ` +
-                `total ${extremeCapCheck.totalBefore} -> ${extremeCapCheck.totalAfter})`
-              );
-            }
-
-            const limitPrice = Number(
-              Math.min(sideAsk, LATE_GAME_MAX_PRICE).toFixed(2)
+          if (!capCheck.ok) {
+            logger.log(
+              `[${asset.symbol}] Skipping layer ${i}; cap hit and not hedging. ` +
+              `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
+              `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
             );
-
-            console.log(
-              `[${asset.symbol}] EXTREME SIGNAL: BUY ${lateSide} @ ${limitPrice}, ` +
-              `size=${bigSize}, p=${sideProb.toFixed(4)}, EV=${(sideProb - limitPrice).toFixed(4)}, ` +
-              `z=${z.toFixed(3)}, secsLeft=${secsLeft.toFixed(2)}`
-            );
-
-            const tokenID = lateSide === "UP" ? upTokenId : downTokenId;
-
-            try {
-              const resp = await client.createAndPostOrder(
-                {
-                  tokenID,
-                  price: limitPrice,
-                  side: Side.BUY,
-                  size: bigSize,
-                  expiration: String(expiresAt),
-                },
-                { tickSize: "0.01", negRisk: false },
-                OrderType.GTD
-              );
-
-              console.log(`[${asset.symbol}] EXTREME ORDER RESP:`, resp);
-              state.sharesBoughtBySlug[slug] =
-                (state.sharesBoughtBySlug[slug] || 0) + bigSize;
-              addPosition(state, slug, lateSide, bigSize);
-            } catch (err) {
-              console.log(
-                `[${asset.symbol}] Error placing EXTREME order:`,
-                err?.message || err
-              );
-            }
-
-            // After an extreme bet, skip the normal layered logic
-            return;
+            continue;
           }
 
-          bigSize = Math.floor(bigSize / 2);
-        }
+          if (capCheck.reason === "hedge_beyond_cap") {
+            logger.log(
+              `[${asset.symbol}] Layer ${i} allowed beyond cap because it reduces net exposure. ` +
+              `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
+            );
+          }
 
-        console.log(
-          `[${asset.symbol}] EXTREME: could not find size that respects caps. Falling back to normal late-game layers.`
-        );
-      }
-      // ========= END EXTREME-SIGNAL MODE =========
+          const limitPrice = Number(target.toFixed(2));
 
-      // Hybrid layered model
-      const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
-      const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
-
-      console.log(
-        `[${asset.symbol}] Late game hybrid: side=${lateSide}, ` +
-        `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`
-      );
-
-      for (let i = 0; i < LAYER_OFFSETS.length; i++) {
-        let target = sideAsk + LAYER_OFFSETS[i];
-        target = Math.max(0.01, Math.min(target, 0.99));
-
-        const ev = sideProb - target;
-        const minEv = LAYER_MIN_EV[i];
-        if (ev < minEv) {
-          console.log(
-            `[${asset.symbol}] Layer ${i}: skip @${target.toFixed(
-              2
-            )} (EV=${ev.toFixed(4)} < ${minEv}).`
-          );
-          continue;
-        }
-
-        // Risk band for this layer based on prob & price
-        let layerRiskBand = "medium";
-        if (sideProb >= PROB_MIN_CORE && target >= PRICE_MIN_CORE) {
-          layerRiskBand = "core";
-        } else if (sideProb <= PROB_MAX_RISKY && target <= PRICE_MAX_RISKY) {
-          layerRiskBand = "risky";
-        }
-
-        const layerSize = sizeForTrade(ev, minsLeft, {
-          minEdgeOverride: 0.0,
-          riskBand: layerRiskBand,
-        });
-
-        if (layerSize <= 0) {
-          console.log(
-            `[${asset.symbol}] Late layer ${i}: size <= 0 (ev=${ev.toFixed(
-              4
-            )}), skipping.`
-          );
-          continue;
-        }
-
-        const capCheck = canPlaceOrder(
-          state,
-          slug,
-          lateSide,
-          layerSize,
-          asset.symbol
-        );
-        if (!capCheck.ok) {
-          console.log(
-            `[${asset.symbol}] Skipping layer ${i}; cap hit and not hedging. ` +
-            `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
-            `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
-          );
-          continue;
-        }
-
-        if (capCheck.reason === "hedge_beyond_cap") {
-          console.log(
-            `[${asset.symbol}] Layer ${i} allowed beyond cap because it reduces net exposure. ` +
-            `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
-          );
-        }
-
-        const limitPrice = Number(target.toFixed(2));
-
-        console.log(
-          `[${asset.symbol}] Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, ` +
-          `size=${layerSize}, EV=${ev.toFixed(4)}, riskBand=${layerRiskBand}`
-        );
-
-        const tokenID = lateSide === "UP" ? upTokenId : downTokenId;
-
-        try {
-          const resp = await client.createAndPostOrder(
-            {
-              tokenID,
-              price: limitPrice,
-              side: Side.BUY,
-              size: layerSize,
-              expiration: String(expiresAt),
-            },
-            { tickSize: "0.01", negRisk: false },
-            OrderType.GTD
+          logger.log(
+            `[${asset.symbol}] Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, ` +
+            `size=${layerSize}, EV=${ev.toFixed(4)}, riskBand=${layerRiskBand}`
           );
 
-          console.log(`[${asset.symbol}] LATE LAYER ${i} RESP:`, resp);
-          state.sharesBoughtBySlug[slug] =
-            (state.sharesBoughtBySlug[slug] || 0) + layerSize;
-          addPosition(state, slug, lateSide, layerSize);
-        } catch (err) {
-          console.log(
-            `[${asset.symbol}] Error placing late layer ${i}:`,
-            err?.message || err
-          );
+          const tokenID = lateSide === "UP" ? upTokenId : downTokenId;
+
+          try {
+            const resp = await client.createAndPostOrder(
+              {
+                tokenID,
+                price: limitPrice,
+                side: Side.BUY,
+                size: layerSize,
+                expiration: String(expiresAt),
+              },
+              { tickSize: "0.01", negRisk: false },
+              OrderType.GTD
+            );
+
+            logger.log(`[${asset.symbol}] LATE LAYER ${i} RESP:`, resp);
+            state.sharesBoughtBySlug[slug] =
+              (state.sharesBoughtBySlug[slug] || 0) + layerSize;
+            addPosition(state, slug, lateSide, layerSize);
+          } catch (err) {
+            logger.log(
+              `[${asset.symbol}] Error placing late layer ${i}:`,
+              err?.message || err
+            );
+          }
         }
       }
     }
-  }
 
-  // ---------- Normal EV-based entries ----------
-  if (candidates.length === 0) {
-    console.log(
-      `[${asset.symbol}] No trade: no side with enough edge in the right direction.`
+    // ---------- Normal EV-based entries ----------
+    if (candidates.length === 0) {
+      logger.log(
+        `[${asset.symbol}] No trade: no side with enough edge in the right direction.`
+      );
+      return;
+    }
+
+    const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
+
+    const sideProbBest = best.side === "UP" ? pUp : pDown;
+    const bestPrice = best.ask;
+
+    let riskBand = "medium";
+    if (sideProbBest >= PROB_MIN_CORE && bestPrice >= PRICE_MIN_CORE) {
+      riskBand = "core";
+    } else if (sideProbBest <= PROB_MAX_RISKY && bestPrice <= PRICE_MAX_RISKY) {
+      riskBand = "risky";
+    }
+
+    const size = sizeForTrade(best.ev, minsLeft, { riskBand });
+
+    if (size <= 0) {
+      logger.log(
+        `[${asset.symbol}] No trade: EV sizing returned 0 (ev=${best.ev.toFixed(
+          4
+        )}, minsLeft=${minsLeft.toFixed(2)}, riskBand=${riskBand})`
+      );
+      return;
+    }
+
+    const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
+    if (!capCheck.ok) {
+      logger.log(
+        `[${asset.symbol}] Skipping EV buy; cap hit and not hedging. ` +
+        `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
+        `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
+      );
+      return;
+    }
+    if (capCheck.reason === "hedge_beyond_cap") {
+      logger.log(
+        `[${asset.symbol}] EV buy allowed beyond total cap because it reduces net exposure. ` +
+        `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
+      );
+    }
+
+    logger.log(
+      `[${asset.symbol}] >>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
+        3
+      )}, EV=${best.ev.toFixed(4)}, size=${size}, riskBand=${riskBand}`
     );
-    return;
-  }
 
-  const best = candidates.reduce((a, b) => (b.ev > a.ev ? b : a));
-
-  const sideProbBest = best.side === "UP" ? pUp : pDown;
-  const bestPrice = best.ask;
-
-  let riskBand = "medium";
-  if (sideProbBest >= PROB_MIN_CORE && bestPrice >= PRICE_MIN_CORE) {
-    riskBand = "core";
-  } else if (sideProbBest <= PROB_MAX_RISKY && bestPrice <= PRICE_MAX_RISKY) {
-    riskBand = "risky";
-  }
-
-  const size = sizeForTrade(best.ev, minsLeft, { riskBand });
-
-  if (size <= 0) {
-    console.log(
-      `[${asset.symbol}] No trade: EV sizing returned 0 (ev=${best.ev.toFixed(
-        4
-      )}, minsLeft=${minsLeft.toFixed(2)}, riskBand=${riskBand})`
+    const expiresAt2 = Math.floor(Date.now() / 1000) + 15 * 60;
+    const resp = await client.createAndPostOrder(
+      {
+        tokenID: best.side === "UP" ? upTokenId : downTokenId,
+        price: best.ask.toFixed(2),
+        side: Side.BUY,
+        size,
+        expiration: String(expiresAt2),
+      },
+      { tickSize: "0.01", negRisk: false },
+      OrderType.GTD
     );
-    return;
+
+    logger.log(`[${asset.symbol}] ORDER RESP:`, resp);
+    const currentShares = state.sharesBoughtBySlug[slug] || 0;
+    state.sharesBoughtBySlug[slug] = currentShares + size;
+    addPosition(state, slug, best.side, size);
+  } catch (err) {
+    // Capture errors into the buffer too
+    logger.error("Critical error in execForAsset:", err.message);
+  } finally {
+    // 3. CRITICAL: Flush logs at the very end, no matter what
+    logger.flush();
   }
+}
 
-  const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
-  if (!capCheck.ok) {
-    console.log(
-      `[${asset.symbol}] Skipping EV buy; cap hit and not hedging. ` +
-      `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
-      `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
-    );
-    return;
+/**
+ * Batches multiple Pyth IDs into a single HTTP request.
+ * Returns a map where keys are the Pyth IDs (matching your config's 0x format)
+ * and values are the calculated float prices.
+ *
+ * @param {string[]} pythIds - Array of Pyth Network Feed IDs (with or without 0x)
+ * @returns {Promise<Object>} - Map: { "0x123...": 98000.50, ... }
+ */
+async function getBatchPythPrices(pythIds) {
+  // 1. Deduplicate IDs to avoid spamming the URL params
+  const uniqueIds = [...new Set(pythIds)];
+
+  // 2. Construct Query Params
+  // Hermes accepts ids[]=...&ids[]=...
+  const params = new URLSearchParams();
+  uniqueIds.forEach((id) => params.append("ids[]", id));
+
+  const url = `https://hermes.pyth.network/api/latest_price_feeds?${params.toString()}`;
+
+  try {
+    // 3. Fetch Data
+    const res = await fetch(url);
+
+    if (!res.ok) {
+      console.error(`[PYTH] Batch fetch failed: ${res.status} ${res.statusText}`);
+      return {}; // Return empty to safely skip this tick
+    }
+
+    const data = await res.json();
+    
+    // 4. Build Lookup Map
+    const priceMap = {};
+
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        // Check validity of the price object
+        if (!item.price || typeof item.price.price === 'undefined' || typeof item.price.expo === 'undefined') {
+          continue;
+        }
+
+        // Parse string values to numbers
+        const rawPrice = Number(item.price.price);
+        const expo = Number(item.price.expo);
+
+        // specific check for valid numbers
+        if (!Number.isFinite(rawPrice) || !Number.isFinite(expo)) {
+          continue;
+        }
+
+        // Calculate human-readable price
+        const finalPrice = rawPrice * Math.pow(10, expo);
+
+        // 5. Key Normalization (Crucial step!)
+        // Hermes returns IDs without '0x'. Your config likely has '0x'.
+        // We ensure the map key starts with '0x' to match your ASSETS config.
+        let key = item.id;
+        if (!key.startsWith("0x")) {
+          key = "0x" + key;
+        }
+
+        priceMap[key] = {
+          price: finalPrice,
+          conf: item.price.conf,
+          publishTime: item.price.publish_time
+        };
+      }
+    }
+
+    return priceMap;
+
+  } catch (err) {
+    console.error(`[PYTH] Network error:`, err.message);
+    return {};
   }
-  if (capCheck.reason === "hedge_beyond_cap") {
-    console.log(
-      `[${asset.symbol}] EV buy allowed beyond total cap because it reduces net exposure. ` +
-      `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
-    );
-  }
-
-  console.log(
-    `[${asset.symbol}] >>> SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(
-      3
-    )}, EV=${best.ev.toFixed(4)}, size=${size}, riskBand=${riskBand}`
-  );
-
-  const expiresAt2 = Math.floor(Date.now() / 1000) + 15 * 60;
-  const resp = await client.createAndPostOrder(
-    {
-      tokenID: best.side === "UP" ? upTokenId : downTokenId,
-      price: best.ask.toFixed(2),
-      side: Side.BUY,
-      size,
-      expiration: String(expiresAt2),
-    },
-    { tickSize: "0.01", negRisk: false },
-    OrderType.GTD
-  );
-
-  console.log(`[${asset.symbol}] ORDER RESP:`, resp);
-  const currentShares = state.sharesBoughtBySlug[slug] || 0;
-  state.sharesBoughtBySlug[slug] = currentShares + size;
-  addPosition(state, slug, best.side, size);
 }
 
 // ---------- MAIN SCHEDULER ----------
+// async function execAll() {
+//   console.log("\n\n\n======================= RUN =======================");
+//   await Promise.all(ASSETS.map(asset => execForAsset(asset).catch(err => console.error(err))));
+// }
 async function execAll() {
-  console.log("\n\n\n======================= RUN =======================");
-  for (const asset of ASSETS) {
-    try {
-      await execForAsset(asset);
-    } catch (err) {
-      console.error(`[${asset.symbol}] ERROR:`, err);
+  console.log(`\n\n================= TICK ${new Date().toISOString()} =================`);
+
+  // 1. Batch Fetch
+  const allPythIds = ASSETS.map(a => a.pythId);
+  const pythPrices = await getBatchPythPrices(allPythIds); // (From previous step)
+
+  // 2. Parallel Execution
+  // We don't need try/catch here because execForAsset handles it internally now
+  await Promise.all(ASSETS.map(asset => {
+    // Pass the specific price data if available
+    const priceData = pythPrices[asset.pythId];
+
+    if (!priceData) {
+      console.log(`[${asset.symbol}] Skipped: No Pyth data returned.`);
+      return Promise.resolve();
     }
-  }
+
+    return execForAsset(asset, priceData);
+  }));
+
+  console.log("================= TICK COMPLETE =================\n");
 }
 
 cron.schedule(`*/${interval} * * * * *`, async () => {
