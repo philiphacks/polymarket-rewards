@@ -1,10 +1,9 @@
 import fs from "fs";
 
 const HISTORY_FILE = "vol_history.json";
-const WINDOW_SIZE = 60; // Keep last 60 minutes
-const MIN_DATA_POINTS = 10; // Need at least 10 mins to trust the calc
+const WINDOW_SIZE = 60; 
+const MIN_DATA_POINTS = 10; 
 
-// Default floors (Safety net if history is empty)
 const FALLBACK_SIGMA_USD = {
   BTC: 70,
   ETH: 4.0,
@@ -12,9 +11,16 @@ const FALLBACK_SIGMA_USD = {
   XRP: 0.0035,
 };
 
-let history = {}; // Structure: { "BTC": [{ ts: 123, price: 95000 }, ...], ... }
+// Map your symbols to Binance pairs
+const BINANCE_PAIRS = {
+  BTC: "BTCUSDT",
+  ETH: "ETHUSDT",
+  SOL: "SOLUSDT",
+  XRP: "XRPUSDT"
+};
 
-// 1. Load History on Startup
+let history = {}; 
+
 function loadHistory() {
   try {
     if (fs.existsSync(HISTORY_FILE)) {
@@ -25,7 +31,6 @@ function loadHistory() {
   }
 }
 
-// 2. Save History (Call this periodically)
 function saveHistory() {
   try {
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(history));
@@ -34,73 +39,101 @@ function saveHistory() {
   }
 }
 
-// 3. Add a price point (Call this once per minute)
 function updatePriceHistory(symbol, price) {
   if (!history[symbol]) history[symbol] = [];
-  
   const now = Date.now();
   const lastEntry = history[symbol][history[symbol].length - 1];
 
-  // Only add if 1 minute has passed since last entry
+  // Only add if ~1 minute has passed (58s buffer)
   if (lastEntry && now - lastEntry.ts < 58 * 1000) {
     return; 
   }
 
   history[symbol].push({ ts: now, price });
-
-  // Trim to window size
   if (history[symbol].length > WINDOW_SIZE) {
     history[symbol] = history[symbol].slice(-WINDOW_SIZE);
   }
-  
   saveHistory();
 }
 
-// 4. The Core Math: Calculate Standard Deviation of Log Returns
 function getRealizedVolatility(symbol, currentPrice) {
   const data = history[symbol];
-
-  // Fallback if not enough data
   if (!data || data.length < MIN_DATA_POINTS) {
-    // console.log(`[VOL] ${symbol}: Using fallback (data points: ${data ? data.length : 0})`);
     return FALLBACK_SIGMA_USD[symbol];
   }
 
-  // Calculate Log Returns: ln(price / prevPrice)
   const returns = [];
   for (let i = 1; i < data.length; i++) {
     const r = Math.log(data[i].price / data[i-1].price);
     returns.push(r);
   }
 
-  // Calculate Mean of returns (usually close to 0 in short timeframes, but good to be precise)
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-
-  // Calculate Variance
   const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
-
-  // Standard Deviation of Returns (Percentage Volatility per Minute)
   const stdDevReturns = Math.sqrt(variance);
-
-  // Convert to USD Volatility: Current Price * % Vol
-  const sigmaUSD = currentPrice * stdDevReturns;
-
-  // Safety: Don't let it drop BELOW the fallback floor (prevents dividing by zero in flat markets)
-  return Math.max(sigmaUSD, FALLBACK_SIGMA_USD[symbol]);
+  
+  return Math.max(currentPrice * stdDevReturns, FALLBACK_SIGMA_USD[symbol]);
 }
 
-// 5. Get "Vol Ratio" (Are we in a high vol regime?)
 function getVolRegimeRatio(symbol, currentSigmaUSD) {
   const floor = FALLBACK_SIGMA_USD[symbol];
   if (!floor) return 1;
-  return currentSigmaUSD / floor; // e.g., 2.5x normal vol
+  return currentSigmaUSD / floor;
 }
 
-// Initialize immediately
+// --- NEW: BACKFILL FUNCTION ---
+async function backfillHistory(symbols) {
+  console.log("[VOL] Starting history backfill from Binance...");
+  
+  const promises = symbols.map(async (symbol) => {
+    // 1. Check if we already have fresh data (less than 2 mins old)
+    if (history[symbol] && history[symbol].length > 50) {
+      const lastTs = history[symbol][history[symbol].length - 1].ts;
+      if (Date.now() - lastTs < 120 * 1000) {
+        console.log(`[VOL] ${symbol} history is fresh. Skipping backfill.`);
+        return;
+      }
+    }
+
+    // 2. Fetch from Binance
+    const pair = BINANCE_PAIRS[symbol];
+    if (!pair) return;
+
+    try {
+      // Fetch last 60 1m candles
+      const url = `https://api.binance.com/api/v3/klines?symbol=${pair}&interval=1m&limit=${WINDOW_SIZE}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(res.statusText);
+      
+      const klines = await res.json();
+      
+      // 3. Parse (Binance format: [openTime, open, high, low, close, ...])
+      // We use Close Price (index 4) and Close Time (index 6)
+      const cleanData = klines.map(k => ({
+        ts: k[6],         // Close time (ms)
+        price: parseFloat(k[4]) // Close price
+      }));
+
+      // 4. Overwrite history
+      history[symbol] = cleanData;
+      console.log(`[VOL] Backfilled ${symbol}: ${cleanData.length} candles.`);
+      
+    } catch (err) {
+      console.error(`[VOL] Failed to backfill ${symbol}:`, err.message);
+    }
+  });
+
+  await Promise.all(promises);
+  saveHistory();
+  console.log("[VOL] Backfill complete.");
+}
+
+// Initialize
 loadHistory();
 
 export const VolatilityManager = {
   updatePriceHistory,
   getRealizedVolatility,
-  getVolRegimeRatio
+  getVolRegimeRatio,
+  backfillHistory // Exported
 };

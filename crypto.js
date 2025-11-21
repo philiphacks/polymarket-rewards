@@ -301,18 +301,12 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    // 4) Dynamic Volatility & Regime Scalar
-    //    Get realized vol from last 60 mins
+    // 4) Volatility & Math
     let rawSigmaPerMin = VolatilityManager.getRealizedVolatility(asset.symbol, currentPrice);
-    
-    //    Apply time decay (shrink vol in last 30s)
     const effectiveSigma = rawSigmaPerMin * getTimeDecayFactor(minsLeft);
-    
-    //    Get Regime Scalar (if vol is high, we require higher Z)
     const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
     const regimeScalar = Math.sqrt(volRatio);
 
-    //    Calculate Z
     const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
     const z = (currentPrice - startPrice) / sigmaT;
     const pUp = normCdf(z);
@@ -323,39 +317,57 @@ async function execForAsset(asset, priceData) {
       `Scalar: ${regimeScalar.toFixed(2)}x | z: ${z.toFixed(3)}`
     );
 
-    //    Adjust Thresholds dynamically
-    const zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;
-    const zMinLateDynamic  = Z_MIN_LATE * regimeScalar;
-    const zHugeDynamic     = Z_HUGE * regimeScalar;
-
     // 5) Order Books
     const [upTokenId, downTokenId] = tokenIds;
     const [upBook, downBook] = await Promise.all([client.getOrderBook(upTokenId), client.getOrderBook(downTokenId)]);
     const { bestAsk: upAsk } = getBestBidAsk(upBook);
     const { bestAsk: downAsk } = getBestBidAsk(downBook);
 
+    // --- RESTORED LOG: Mid Price ---
+    const mid = (upAsk && downAsk) ? (upAsk + downAsk) / 2 : (upAsk || downAsk);
+    logger.log(`Up ask / Down ask: ${upAsk?.toFixed(3) ?? 'n/a'} / ${downAsk?.toFixed(3) ?? 'n/a'}, mid≈${mid?.toFixed(3) ?? 'n/a'}`);
+
     if (!upAsk && !downAsk) { logger.log("No asks."); return; }
+
+    // --- RESTORED LOG: Existing Position ---
+    const existingSide = getExistingSide(state, slug);
+    logger.log(`Existing net side: ${existingSide || "FLAT"}`);
+
+    // --- RESTORED LOG: Countersignal (Warning if holding wrong side) ---
+    const sharesUp = state.sideSharesBySlug[slug]?.UP || 0;
+    const sharesDown = state.sideSharesBySlug[slug]?.DOWN || 0;
+    
+    if (sharesUp > 0 && pUp < 0.50) {
+      logger.log(`>>> COUNTERSIGNAL: Holding UP but pUp=${pUp.toFixed(4)}`);
+    }
+    if (sharesDown > 0 && pDown < 0.50) {
+      logger.log(`>>> COUNTERSIGNAL: Holding DOWN but pDown=${pDown.toFixed(4)}`);
+    }
 
     // Log Snapshot
     logTickSnapshot({
       ts: Date.now(), symbol: asset.symbol, slug, minsLeft,
-      startPrice, currentPrice, 
-      sigmaPerMin: rawSigmaPerMin,
+      startPrice, currentPrice, sigmaPerMin: rawSigmaPerMin,
       z, pUp, pDown, upAsk, downAsk,
-      sharesUp: state.sideSharesBySlug[slug]?.UP || 0,
-      sharesDown: state.sideSharesBySlug[slug]?.DOWN || 0,
+      sharesUp, sharesDown,
     });
 
     // 6) Decision Gating
     const zMaxTimeBased = dynamicZMax(minsLeft);
     const absZ = Math.abs(z);
 
+    const zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;
+    const zMinLateDynamic  = Z_MIN_LATE * regimeScalar;
+    const zHugeDynamic     = Z_HUGE * regimeScalar;
+
     if (
       minsLeft > 5 ||
       (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < zHugeDynamic) ||
       (minsLeft <= MINUTES_LEFT && absZ < zMinLateDynamic)
     ) {
-      logger.log(`Skip: |z|=${absZ.toFixed(3)} < Required (Huge:${zHugeDynamic.toFixed(2)} or Min:${zMinLateDynamic.toFixed(2)})`);
+      const evUp = upAsk ? pUp - upAsk : 0;
+      const evDown = downAsk ? pDown - downAsk : 0;
+      logger.log(`Skip: |z|=${absZ.toFixed(3)} < Req | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
       return;
     }
 
@@ -378,13 +390,15 @@ async function execForAsset(asset, priceData) {
       else if (pDown >= pReq && z < -zMinLateDynamic) { lateSide = "DOWN"; sideProb = pDown; sideAsk = downAsk || 0.99; }
 
       if (lateSide) {
-        // Extreme Mode
+        logger.log(`Late game check: side=${lateSide}, prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`);
+        
         if (absZ >= zHugeDynamic && secsLeft <= LATE_GAME_EXTREME_SECS && sideAsk <= LATE_GAME_MAX_PRICE && (sideProb - sideAsk) >= LATE_GAME_MIN_EV) {
           const limitPrice = Math.min(sideAsk, LATE_GAME_MAX_PRICE);
           const maxShares = MAX_SHARES_PER_MARKET[asset.symbol] || 500;
-          const bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION); // Simplified sizing for safety
+          const bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION);
 
           const capCheck = canPlaceOrder(state, slug, lateSide, bigSize, asset.symbol);
+          
           if (capCheck.ok) {
             logger.log(`EXTREME: Buying ${bigSize} ${lateSide} @ ${limitPrice}`);
             await client.createAndPostOrder({
@@ -393,14 +407,25 @@ async function execForAsset(asset, priceData) {
             }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
             addPosition(state, slug, lateSide, bigSize);
             state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
-            return; // Done for this tick
+            return;
+          } else {
+            // --- RESTORED LOG: Detailed Cap Rejection ---
+            logger.log(
+              `Skipping EXTREME; cap hit. (reason=${capCheck.reason}, ` +
+              `totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
+              `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
+            );
           }
         }
       }
     }
 
     // --- Normal Entry ---
-    if (!candidates.length) return;
+    if (!candidates.length) {
+      logger.log("No trade candidates with positive EV.");
+      return;
+    }
+    
     const best = candidates.reduce((a, b) => a.ev > b.ev ? a : b);
     
     let riskBand = "medium";
@@ -412,7 +437,15 @@ async function execForAsset(asset, priceData) {
     if (size <= 0) { logger.log(`EV>0 but size=0`); return; }
 
     const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
-    if (!capCheck.ok) { logger.log(`Cap hit: ${capCheck.reason}`); return; }
+    if (!capCheck.ok) { 
+      // --- RESTORED LOG: Detailed Cap Rejection ---
+      logger.log(
+        `Skipping trade; cap hit. (reason=${capCheck.reason}, ` +
+        `totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
+        `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
+      );
+      return; 
+    }
 
     logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size})`);
     await client.createAndPostOrder({
@@ -466,4 +499,15 @@ async function execAll() {
   console.log("=== TICK END ===");
 }
 
-cron.schedule(`*/${interval} * * * * *`, () => execAll().catch(console.error));
+// === NEW STARTUP LOGIC ===
+(async () => {
+  console.log("Initializing Bot...");
+
+  // 1. Warm up volatility with historical data
+  const symbols = ASSETS.map(a => a.symbol);
+  await VolatilityManager.backfillHistory(symbols);
+
+  // 2. Start the loop ONLY after backfill is done
+  console.log("Starting Cron...");
+  cron.schedule(`*/${interval} * * * * *`, () => execAll().catch(console.error));
+})();
