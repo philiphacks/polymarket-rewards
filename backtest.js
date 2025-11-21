@@ -55,7 +55,7 @@ const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
 
 // Enable/disable debug logs (keep false for large runs)
-const DEBUG = false;
+const DEBUG = true;
 
 // ----------------- SMALL HELPERS ------------------
 
@@ -142,11 +142,13 @@ function loadOutcomes(csvPath) {
   for (const row of rows) {
     const slug = row.slug;
     let outcome = row.outcome;
+    let currentValue = Number(row.currentValue);
 
     if (!slug || !outcome) continue;
 
     outcome = outcome.trim().toUpperCase(); // "UP" / "DOWN"
-    outcomeBySlug[slug] = outcome;
+    const reverse = outcome === 'UP' ? 'DOWN' : 'UP';
+    outcomeBySlug[slug] = currentValue > 0 ? outcome : reverse;
   }
 
   console.log(
@@ -547,7 +549,7 @@ function decideFromSnapshot(snapshot, simState, outcomeKnown) {
 
         const limitPrice = Number(target.toFixed(2));
 
-        orders.push({
+        const order = {
           kind: "layer",
           symbol,
           slug,
@@ -556,7 +558,15 @@ function decideFromSnapshot(snapshot, simState, outcomeKnown) {
           price: limitPrice,
           ev,
           riskBand: layerRiskBand,
-        });
+        };
+        orders.push(order);
+        if (slug === 'eth-updown-15m-1763699400') {
+          console.log(`[${slug}] side=${order.side},
+            size=${order.size}, price=${limitPrice},
+            ev=${ev}, riskBand=${layerRiskBand},
+            prob=${sideProb}, minsLeft=${minsLeft}, z=${absZ}
+        `);
+        }
 
         addPosition(simState, slug, lateSide, layerSize);
       }
@@ -699,6 +709,7 @@ async function main() {
 
   console.log(`[BACKTEST] Total simulated orders: ${allOrders.length}`);
 
+  console.log(outcomeBySlug['eth-updown-15m-1763699400']);
   const { totalPnL, perSlugResults } = computePnL(allOrders, outcomeBySlug);
 
   console.log("\n[BACKTEST] PnL by slug (worst to best):");
