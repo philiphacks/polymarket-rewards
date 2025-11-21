@@ -14,6 +14,7 @@ import fs from "fs";
 // Adjust these filenames to match what your live bot produced.
 const TICK_FILES = [
   "ticks-20251120.jsonl",
+  "ticks-20251121.jsonl",
 ];
 
 // CSV exported from your positions (the one you called positions-pnl.csv)

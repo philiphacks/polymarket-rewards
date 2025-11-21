@@ -283,6 +283,45 @@ function getSigmaPerMinUSD(volKey) {
   return sigma;
 }
 
+// Effective per-minute sigma that shrinks in the last seconds before expiry.
+// We keep the same 1-minute floor (e.g. 70 USD for BTC), but as minsLeft -> 0
+// we reduce sigma so the model can become more decisive.
+function effectiveSigmaPerMin(volKey, minsLeft) {
+  // 1) Baseline per-minute sigma from config/floor
+  const baseSigma = getSigmaPerMinUSD(volKey);
+
+  // 2) For most of the window (>= 1 minute left), don't touch it.
+  if (minsLeft >= 1) {
+    return baseSigma;
+  }
+
+  // 3) Work in seconds for clarity
+  const secsLeft = minsLeft * 60;
+
+  // We start shrinking inside the last 30 seconds.
+  // At 30s: factor = 1.0 (no shrink)
+  // At 0s:  factor = MIN_FACTOR (e.g. 0.6 -> 60% of base sigma)
+  const SHRINK_WINDOW_SECS = 30;
+  const MIN_FACTOR = 0.6;
+
+  // If we are still more than 30s away (but < 60s because of the minsLeft>=1 check),
+  // don't shrink yet: sigma = baseSigma.
+  if (secsLeft >= SHRINK_WINDOW_SECS) {
+    return baseSigma;
+  }
+
+  // 4) t goes from 0 (at 30s) to 1 (at 0s)
+  const t = Math.max(
+    0,
+    Math.min(1, (SHRINK_WINDOW_SECS - secsLeft) / SHRINK_WINDOW_SECS)
+  );
+
+  // Linear interpolation: factor = 1 -> MIN_FACTOR over the last 30 seconds
+  const factor = 1 - t * (1 - MIN_FACTOR);
+
+  return baseSigma * factor;
+}
+
 function getExistingSide(state, slug) {
   const sidePos = state.sideSharesBySlug?.[slug];
   if (!sidePos) return null;
@@ -613,8 +652,11 @@ async function execForAsset(asset) {
     return;
   }
 
-  // 4) Compute probability Up using per-asset σ
-  const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
+  // 4) Compute probability Up using *effective* per-asset σ
+  //    - base sigma comes from volKey (e.g. "BTC/USD")
+  //    - effectiveSigmaPerMin shrinks it in the last seconds
+  // const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
+  const SIGMA_PER_MIN = effectiveSigmaPerMin(asset.symbol, minsLeft);
   const sigmaT = SIGMA_PER_MIN * Math.sqrt(minsLeft);
   const diff = currentPrice - startPrice;
   const z = diff / sigmaT;
