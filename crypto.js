@@ -768,7 +768,7 @@ async function execForAsset(asset, priceData) {
         minsLeft,
         startPrice,
         currentPrice,
-        sigmaPerMin: SIGMA_PER_MIN,
+        sigmaPerMin: rawSigmaPerMin,
         z,
         pUp,
         pDown,
