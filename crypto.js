@@ -7,6 +7,7 @@ import clob from "@polymarket/clob-client";
 const { ClobClient, Side, OrderType } = clob;
 import { Wallet } from "@ethersproject/wallet";
 import fs from "fs";
+import { VolatilityManager } from "./VolatilityManager.js";
 
 // ---------- LOGGER FN --------------
 function createScopedLogger(symbol) {
@@ -535,6 +536,16 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
   return size;
 }
 
+function getTimeDecayFactor(minsLeft) {
+  if (minsLeft >= 1) return 1.0;
+  const secsLeft = minsLeft * 60;
+  const SHRINK_WINDOW_SECS = 30;
+  const MIN_FACTOR = 0.6;
+  if (secsLeft >= SHRINK_WINDOW_SECS) return 1.0;
+  const t = Math.max(0, Math.min(1, (SHRINK_WINDOW_SECS - secsLeft) / SHRINK_WINDOW_SECS));
+  return 1 - t * (1 - MIN_FACTOR);
+}
+
 // ---------- CORE EXECUTION PER ASSET ----------
 async function execForAsset(asset, priceData) {
   const logger = createScopedLogger(asset.symbol);
@@ -688,17 +699,44 @@ async function execForAsset(asset, priceData) {
     // 4) Compute probability Up using *effective* per-asset σ
     //    - base sigma comes from volKey (e.g. "BTC/USD")
     //    - effectiveSigmaPerMin shrinks it in the last seconds
-    // const SIGMA_PER_MIN = getSigmaPerMinUSD(asset.symbol);
-    const SIGMA_PER_MIN = effectiveSigmaPerMin(asset.symbol, minsLeft);
-    const sigmaT = SIGMA_PER_MIN * Math.sqrt(minsLeft);
+    // --- NEW STRATEGY IMPLEMENTATION ---
+
+    // 1. Get Dynamic Sigma (Realized Volatility)
+    // This replaces getSigmaPerMinUSD(volKey)
+    // If calculated is 140 and floor is 70, this returns 140.
+    let rawSigmaPerMin = VolatilityManager.getRealizedVolatility(asset.symbol, currentPrice);
+
+    // 2. Apply your existing Time Decay logic (Effective Sigma)
+    // We reuse your logic, but apply it to the dynamic sigma
+    const effectiveSigma = rawSigmaPerMin * getTimeDecayFactor(minsLeft); 
+
+    // 3. Get Volatility Regime (Fat Tail Adjustment)
+    // If ratio is 1.0 (Calm), scalar is 1.0
+    // If ratio is 3.0 (Chaos), scalar is roughly 1.5 (don't scale linearly, it's too aggressive)
+    const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
+    
+    // Heuristic: We widen thresholds by sqrt of the vol ratio. 
+    // If Vol is 4x normal, we require 2x the Z-score to enter.
+    const regimeScalar = Math.sqrt(volRatio); 
+    
+    // -----------------------------------
+
+    // Calculate Z
     const diff = currentPrice - startPrice;
+    const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
     const z = diff / sigmaT;
     const pUp = normCdf(z);
     const pDown = 1 - pUp;
-
+    
+    // Log the new metrics
     logger.log(
-      `[${asset.symbol}] σ ${SIGMA_PER_MIN.toFixed(5)} | z-score: ${z.toFixed(3)} | Model P(Up): ${pUp.toFixed(4)} | Model P(Down): ${pDown.toFixed(4)}`
+      `[${asset.symbol}] σ_raw: $${rawSigmaPerMin.toFixed(2)} (Ratio: ${volRatio.toFixed(2)}x) | ` +
+      `Scalar: ${regimeScalar.toFixed(2)}x | z-score: ${z.toFixed(3)}`
     );
+
+    const zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;
+    const zMinLateDynamic  = Z_MIN_LATE * regimeScalar;
+    const zHugeDynamic     = Z_HUGE * regimeScalar;
 
     // 5) Order books
     const upTokenId = tokenIds[0];
@@ -794,8 +832,8 @@ async function execForAsset(asset, priceData) {
     // Time/z gate: don't even consider trades in bad regions
     if (
       minsLeft > 5 ||                                        // too early, always skip
-      (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_HUGE) || // 3–5m, only trade if |z| >= Z_HUGE
-      (minsLeft <= MINUTES_LEFT && absZ < Z_MIN_LATE)        // ≤3m, require at least Z_MIN_LATE
+      (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < zHugeDynamic) || // 3–5m, only trade if |z| >= Z_HUGE
+      (minsLeft <= MINUTES_LEFT && absZ < zMinLateDynamic)        // ≤3m, require at least Z_MIN_LATE
     ) {
       const evUp = upAsk != null ? pUp - upAsk : 0;
       const evDown = downAsk != null ? pDown - downAsk : 0;
@@ -823,7 +861,7 @@ async function execForAsset(asset, priceData) {
     );
 
     // Directional buy-only logic
-    const directionalZMin = minsLeft > MINUTES_LEFT ? Z_MIN_EARLY : Z_MIN_LATE;
+    const directionalZMin = minsLeft > MINUTES_LEFT ? zMinEarlyDynamic : zMinLateDynamic;
     let candidates = [];
 
     if (z >= directionalZMin && upAsk != null) {
@@ -869,11 +907,11 @@ async function execForAsset(asset, priceData) {
       let sideProb = null;
       let sideAsk = null;
 
-      if (pUp >= pReq && z > Z_MIN_LATE) {
+      if (pUp >= pReq && z > zMinLateDynamic) {
         lateSide = "UP";
         sideProb = pUp;
         sideAsk = upAsk || 0.99;
-      } else if (pDown >= pReq && z < -Z_MIN_LATE) {
+      } else if (pDown >= pReq && z < -zMinLateDynamic) {
         lateSide = "DOWN";
         sideProb = pDown;
         sideAsk = downAsk || 0.99;
@@ -1243,6 +1281,8 @@ async function execAll() {
       return Promise.resolve();
     }
 
+    VolatilityManager.updatePriceHistory(asset.symbol, priceData.price);
+
     return execForAsset(asset, priceData);
   }));
 
@@ -1254,9 +1294,4 @@ cron.schedule(`*/${interval} * * * * *`, async () => {
     console.error('Fatal error in main():', err);
     process.exit(1);
   });
-});
-
-cron.schedule("0 */20 * * * *", () => {
-  console.log("\n[VOL] Reloading btc_sigma_1m.json...");
-  sigmaConfig = loadSigmaConfig();
 });
