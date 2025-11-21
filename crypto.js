@@ -1000,7 +1000,7 @@ async function execForAsset(asset) {
 
         console.log(
           `[${asset.symbol}] Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, ` +
-          `size=${layerSize}, EV=${ev.toFixed(4)}`
+          `size=${layerSize}, EV=${ev.toFixed(4)}, riskBand=${layerRiskBand}`
         );
 
         const tokenID = lateSide === "UP" ? upTokenId : downTokenId;
