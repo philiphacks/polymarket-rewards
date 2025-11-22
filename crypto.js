@@ -411,6 +411,14 @@ async function execForAsset(asset, priceData) {
       dynamicMinEdge = dynamicMinEdge * 0.6; 
       // e.g. 0.03 becomes 0.018 (1.8% edge)
     }
+    // OPTIMIZATION: Demand higher edge for "risky" assets or lower prob trades
+    if (asset.symbol === "SOL") {
+      dynamicMinEdge += 0.02; // Require +2% extra edge for SOL
+    }
+    const prob = best.side === "UP" ? pUp : pDown;
+    if (prob < 0.90) {
+      dynamicMinEdge = Math.max(dynamicMinEdge, 0.05); 
+    }
 
     logger.log(`Min Edge Required: ${dynamicMinEdge.toFixed(4)} (Scalar: ${regimeScalar.toFixed(2)})`);
     candidates = candidates.filter(c => c.ev > dynamicMinEdge);
@@ -458,17 +466,37 @@ async function execForAsset(asset, priceData) {
         const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
         const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
 
-        logger.log(`Late game hybrid: side=${lateSide}, prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`);
+        let edgePenalty = 0;
+        // Fix 1: SOL Churn (High Volume / Low PnL fix)
+        if (asset.symbol === "SOL") {
+          edgePenalty += 0.015; 
+        }
+
+        // Fix 2: The "Break Even" Bucket (0.85-0.90 fix)
+        // If we aren't 90% sure, we shouldn't be aggressive with layers
+        if (sideProb < 0.90) {
+          edgePenalty += 0.03;
+        }
+
+        logger.log(
+          `Late game hybrid: side=${lateSide}, prob=${sideProb.toFixed(4)}, ` +
+          `ask=${sideAsk.toFixed(3)}, Penalty=${edgePenalty.toFixed(3)}`
+        );
 
         for (let i = 0; i < LAYER_OFFSETS.length; i++) {
           let target = sideAsk + LAYER_OFFSETS[i];
           target = Math.max(0.01, Math.min(target, 0.99));
 
           const ev = sideProb - target;
-          const minEv = LAYER_MIN_EV[i];
-          
-          if (ev < minEv) {
-             logger.log(`Layer ${i}: skip @${target.toFixed(2)} (EV=${ev.toFixed(4)} < ${minEv})`);
+          let minEv = LAYER_MIN_EV[i];
+
+          if (regimeScalar < 1.2) {
+            minEv *= 0.6;
+          }
+          const finalMinEv = minEv + edgePenalty;
+
+          if (ev < finalMinEv) {
+             logger.log(`Layer ${i}: skip @${target.toFixed(2)} (EV=${ev.toFixed(4)} < ${finalMinEv})`);
              continue; 
           }
 
@@ -478,8 +506,8 @@ async function execForAsset(asset, priceData) {
 
           const layerSize = sizeForTrade(ev, minsLeft, { minEdgeOverride: 0.0, riskBand: layerRiskBand });
           if (layerSize <= 0) {
-             logger.log(`Late layer ${i}: size <= 0, skipping.`);
-             continue;
+            logger.log(`Late layer ${i}: size <= 0, skipping.`);
+            continue;
           }
 
           const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
@@ -493,11 +521,11 @@ async function execForAsset(asset, priceData) {
           }
           
           if (capCheck.reason === "hedge_beyond_cap") {
-             logger.log(`Layer ${i} allowed beyond cap (hedge).`);
+            logger.log(`Layer ${i} allowed beyond cap (hedge).`);
           }
 
           const limitPrice = Number(target.toFixed(2));
-          logger.log(`Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, size=${layerSize}, EV=${ev.toFixed(4)}`);
+          logger.log(`Late layer ${i}: BUY ${lateSide} @ ${limitPrice}, size=${layerSize}, EV=${ev.toFixed(4)} (Req: ${finalMinEv.toFixed(4)})`);
 
           try {
             const resp = await client.createAndPostOrder({

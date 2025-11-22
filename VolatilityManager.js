@@ -7,11 +7,18 @@ const MIN_DATA_POINTS = 10;
 // 1 Basis Point (bps) = 0.01% = 0.0001
 // These are the "Minimum Volatility" floors in Basis Points per Minute.
 // If realized vol drops below this, we assume this floor to prevent noise trading.
+// const MIN_VOL_BPS = {
+//   BTC: 3.5,  // ~0.035% per minute (At $95k, this is ~$33)
+//   ETH: 4.0,  // ~0.04% per minute
+//   SOL: 6.0,  // ~0.06% per minute (Higher beta than BTC)
+//   XRP: 6.0,  // ~0.06% per minute
+// };
+
 const MIN_VOL_BPS = {
-  BTC: 3.5,  // ~0.035% per minute (At $95k, this is ~$33)
-  ETH: 4.0,  // ~0.04% per minute
-  SOL: 6.0,  // ~0.06% per minute (Higher beta than BTC)
-  XRP: 6.0,  // ~0.06% per minute
+  BTC: 3.0,  // Lowered to capture more BTC volume (your best asset)
+  ETH: 4.0,  // Keep steady
+  SOL: 8.0,  // Raised to reduce noise/churn (your worst asset)
+  XRP: 6.0,  // Keep steady
 };
 
 // Map your symbols to Binance pairs for backfill
