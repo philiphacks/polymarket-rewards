@@ -9,10 +9,11 @@ const CONFIG = {
   MAX_SHARES: 500,
   FEE_BPS: 10,       // 10bps = 0.1% fee per trade (Simulating slippage + taker fee)
 };
+const allTrades = [];
 // ==================================================
 
 // CHANGE THIS TO YOUR ACTUAL LOG FILE NAME
-const LOG_FILE = "ticks-20251122.jsonl"; 
+const LOG_FILE = "ticks-20251121.jsonl"; 
 
 async function runBacktest() {
   const fileStream = fs.createReadStream(LOG_FILE);
@@ -73,6 +74,16 @@ async function runBacktest() {
           // Easier to have executeTrade return the volume it generated.
           const vol = executeTrade(m, "UP", upAsk, TRADE_SIZE);
           totalVolume += vol;
+
+          allTrades.push({
+            symbol: m.symbol,
+            side: "UP",
+            entryPrice: upAsk,
+            modelProb: pUp,
+            minsLeft: minsLeft,
+            size: TRADE_SIZE,
+            marketSlug: slug
+          });
         }
       }
 
@@ -82,6 +93,16 @@ async function runBacktest() {
         if (ev > CONFIG.MIN_EDGE) {
           const vol = executeTrade(m, "DOWN", downAsk, TRADE_SIZE);
           totalVolume += vol;
+
+          allTrades.push({
+            symbol: m.symbol,
+            side: "DOWN",
+            entryPrice: downAsk,
+            modelProb: pDown,
+            minsLeft: minsLeft,
+            size: TRADE_SIZE,
+            marketSlug: slug
+          });
         }
       }
     }
@@ -111,6 +132,8 @@ async function runBacktest() {
     }
   }
 
+  runDeepAnalysis(allTrades, markets);
+
   console.log("\n================ RESULTS ================");
   console.log(`Config: Z_EARLY=${CONFIG.Z_MIN_EARLY}, EDGE=${CONFIG.MIN_EDGE}, FEE=${CONFIG.FEE_BPS}bps`);
   console.log(`Total Markets Traded: ${wins + losses}`);
@@ -120,7 +143,113 @@ async function runBacktest() {
   console.log("=========================================");
 }
 
-// Fixed: Now applies fees and returns the dollar volume traded
+function runDeepAnalysis(trades, marketsMap) {
+  console.log("\n\n📊 ============ DEEP DIVE ANALYSIS ============");
+
+  // Helper to calculate PnL per trade
+  const calculateTradePnL = (trade) => {
+    const m = marketsMap[trade.marketSlug];
+    const winner = m.finalPrice > m.startPrice ? "UP" : "DOWN";
+    
+    // Did this specific trade win?
+    const won = trade.side === winner;
+    
+    // Cost basis (including fee)
+    const cost = trade.size * trade.entryPrice;
+    const fee = cost * (CONFIG.FEE_BPS / 10000);
+    const totalCost = cost + fee;
+    
+    // Payout ($1 per share if won, $0 if lost)
+    const payout = won ? trade.size : 0;
+    
+    return payout - totalCost;
+  };
+
+  // ============================================
+  // A. CALIBRATION CHECK (God View)
+  // ============================================
+  console.log("\n--- [A] CALIBRATION CHECK ---");
+  console.log("(Does Model Probability match Win Rate?)");
+  
+  const buckets = {}; // "0.50", "0.55", "0.60"...
+  
+  trades.forEach(t => {
+    const pnl = calculateTradePnL(t);
+    const won = pnl > 0; // Rough approximation (or check outcome strictly)
+    
+    // Round probability to nearest 0.05 (5%)
+    const bucket = (Math.floor(t.modelProb * 20) / 20).toFixed(2);
+    
+    if (!buckets[bucket]) buckets[bucket] = { total: 0, wins: 0, pnl: 0 };
+    buckets[bucket].total++;
+    if (won) buckets[bucket].wins++;
+    buckets[bucket].pnl += pnl;
+  });
+
+  console.log("Prob Bucket | Trades | Actual Win% | Avg PnL/Trade");
+  Object.keys(buckets).sort().forEach(b => {
+    const d = buckets[b];
+    const actualWinRate = (d.wins / d.total);
+    const predicted = parseFloat(b);
+    const diff = actualWinRate - predicted;
+    const alert = Math.abs(diff) > 0.10 ? "⚠️" : "✅"; // Warn if >10% off
+    
+    console.log(
+      `${b}-${(parseFloat(b)+0.05).toFixed(2)}   | ` +
+      `${d.total.toString().padEnd(6)} | ` +
+      `${(actualWinRate * 100).toFixed(1)}% ${alert}      | ` +
+      `$${(d.pnl / d.total).toFixed(3)}`
+    );
+  });
+
+  // ============================================
+  // B. THE LATE GAME TRAP
+  // ============================================
+  console.log("\n--- [B] TIME ANALYSIS (Late Game Trap) ---");
+  
+  const timeStats = {
+    "Early (>5m)": { pnl: 0, count: 0 },
+    "Mid   (2-5m)": { pnl: 0, count: 0 },
+    "Late  (<2m)": { pnl: 0, count: 0 },
+  };
+
+  trades.forEach(t => {
+    const pnl = calculateTradePnL(t);
+    let key = "Mid   (2-5m)";
+    if (t.minsLeft > 5) key = "Early (>5m)";
+    if (t.minsLeft < 2) key = "Late  (<2m)";
+    
+    timeStats[key].pnl += pnl;
+    timeStats[key].count++;
+  });
+
+  for (const [key, stat] of Object.entries(timeStats)) {
+    console.log(`${key} : PnL $${stat.pnl.toFixed(2)} (${stat.count} trades)`);
+  }
+
+  // ============================================
+  // C. ASSET CORRELATION (Bad Asset Filter)
+  // ============================================
+  console.log("\n--- [C] ASSET PERFORMANCE ---");
+  const assetStats = {};
+
+  trades.forEach(t => {
+    const pnl = calculateTradePnL(t);
+    if (!assetStats[t.symbol]) assetStats[t.symbol] = { pnl: 0, vol: 0, trades: 0 };
+    
+    assetStats[t.symbol].pnl += pnl;
+    assetStats[t.symbol].trades++;
+    assetStats[t.symbol].vol += (t.size * t.entryPrice);
+  });
+
+  Object.keys(assetStats).forEach(sym => {
+    const s = assetStats[sym];
+    console.log(`[${sym}] PnL: $${s.pnl.toFixed(2)} | Trades: ${s.trades} | Vol: $${s.vol.toFixed(0)}`);
+  });
+  
+  console.log("============================================\n");
+}
+
 function executeTrade(market, side, price, size) {
   const currentSize = market.positions[side] || 0;
 
