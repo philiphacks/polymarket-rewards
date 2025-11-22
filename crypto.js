@@ -352,9 +352,24 @@ async function execForAsset(asset, priceData) {
     const zMaxTimeBased = dynamicZMax(minsLeft);
     const absZ = Math.abs(z);
 
-    const zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;
-    const zMinLateDynamic  = Z_MIN_LATE * regimeScalar;
-    const zHugeDynamic     = Z_HUGE * regimeScalar;
+    // --- STEP 3: DYNAMIC Z-THRESHOLD SCALING ---
+    let zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;
+    let zMinLateDynamic  = Z_MIN_LATE * regimeScalar;
+    let zHugeDynamic     = Z_HUGE * regimeScalar;
+
+    // LOW VOLATILITY ADJUSTMENT:
+    // If the regime is "calm" (scalar < 1.2), mean reversion is safer.
+    // We lower the Z-barriers by 15% to get active in the chop.
+    if (regimeScalar < 1.2) {
+      const LOW_VOL_DISCOUNT = 0.85; // Reduce req by 15%
+      zMinEarlyDynamic *= LOW_VOL_DISCOUNT;
+      zMinLateDynamic  *= LOW_VOL_DISCOUNT;
+      // We keep Z_HUGE mostly intact or reduce slightly, as "Extreme" still needs to be extreme
+      zHugeDynamic     *= 0.95; 
+      
+      logger.log(`[Low Vol Regime] Reducing Z-thresholds by 15%. New Early/Late: ${zMinEarlyDynamic.toFixed(2)} / ${zMinLateDynamic.toFixed(2)}`);
+    }
+    // -------------------------------------------
 
     // Gating Log
     if (
@@ -389,7 +404,16 @@ async function execForAsset(asset, priceData) {
       logger.log(`We don't buy Down here (z=${z.toFixed(3)} too small or no ask).`);
     }
 
-    candidates = candidates.filter(c => c.ev > (minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE));
+    let dynamicMinEdge = (minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE);
+        
+    // If market is quiet (scalar near 1.0), reduce required edge by up to 40%
+    if (regimeScalar <= 1.1) {
+      dynamicMinEdge = dynamicMinEdge * 0.6; 
+      // e.g. 0.03 becomes 0.018 (1.8% edge)
+    }
+
+    logger.log(`Min Edge Required: ${dynamicMinEdge.toFixed(4)} (Scalar: ${regimeScalar.toFixed(2)})`);
+    candidates = candidates.filter(c => c.ev > dynamicMinEdge);
 
     // ============================================================
     // LATE GAME MODE
