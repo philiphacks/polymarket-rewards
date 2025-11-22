@@ -1,4 +1,4 @@
-// Version 1.1 (Regime Aware + Parallel)
+// Version 1.3 (Verbose Logging Restored)
 
 import 'dotenv/config';
 import cron from "node-cron";
@@ -8,7 +8,7 @@ import { Wallet } from "@ethersproject/wallet";
 import fs from "fs";
 import { VolatilityManager } from "./VolatilityManager.js";
 
-// ---------- LOGGER FN --------------
+// ---------- LOGGER FN (Buffered) --------------
 function createScopedLogger(symbol) {
   const logs = [];
   const formatArgs = (args) => args.map(arg => {
@@ -208,6 +208,7 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
   return Math.min(size, ABS_MAX);
 }
 
+// New Helper: replaces effectiveSigmaPerMin from V1.0
 function getTimeDecayFactor(minsLeft) {
   if (minsLeft >= 1) return 1.0;
   const secsLeft = minsLeft * 60;
@@ -270,7 +271,7 @@ async function execForAsset(asset, priceData) {
       state.resetting = true;
       logger.log(`Interval over. Resetting...`);
       await sleep(30_000);
-      stateBySymbol[asset.symbol] = null;
+      stateBySymbol[asset.symbol] = null; // Force clean reset
       return;
     }
     if (isInSlamWindow()) return;
@@ -294,14 +295,14 @@ async function execForAsset(asset, priceData) {
 
     // 3) Current Price & Sanity
     const currentPrice = priceData.price;
-    logger.log(`Open $${startPrice.toFixed(2)} | Curr $${currentPrice.toFixed(2)}`);
+    logger.log(`Open $${startPrice.toFixed(4)} | Curr $${currentPrice.toFixed(4)}`);
 
     if (Math.abs(currentPrice - startPrice) / startPrice > MAX_REL_DIFF) {
       logger.log(`Price sanity FAILED. Skipping.`);
       return;
     }
 
-    // 4) Volatility & Math (New V1.1 Logic)
+    // 4) Volatility & Math (Merged Logic)
     let rawSigmaPerMin = VolatilityManager.getRealizedVolatility(asset.symbol, currentPrice);
     const effectiveSigma = rawSigmaPerMin * getTimeDecayFactor(minsLeft);
     const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
@@ -313,7 +314,7 @@ async function execForAsset(asset, priceData) {
     const pDown = 1 - pUp;
 
     logger.log(
-      `σ_raw: $${rawSigmaPerMin.toFixed(2)} (Ratio: ${volRatio.toFixed(2)}x) | ` +
+      `σ_raw: $${rawSigmaPerMin.toFixed(4)} (Ratio: ${volRatio.toFixed(2)}x) | ` +
       `Scalar: ${regimeScalar.toFixed(2)}x | z: ${z.toFixed(3)}`
     );
 
@@ -323,7 +324,7 @@ async function execForAsset(asset, priceData) {
     const { bestAsk: upAsk } = getBestBidAsk(upBook);
     const { bestAsk: downAsk } = getBestBidAsk(downBook);
 
-    // Verbose logging restored
+    // --- Verbose Logs ---
     const mid = (upAsk && downAsk) ? (upAsk + downAsk) / 2 : (upAsk || downAsk);
     logger.log(`Up ask / Down ask: ${upAsk?.toFixed(3) ?? 'n/a'} / ${downAsk?.toFixed(3) ?? 'n/a'}, mid≈${mid?.toFixed(3) ?? 'n/a'}`);
 
@@ -332,24 +333,30 @@ async function execForAsset(asset, priceData) {
     const existingSide = getExistingSide(state, slug);
     logger.log(`Existing net side: ${existingSide || "FLAT"}`);
 
-    // Snapshot
+    const sharesUp = state.sideSharesBySlug[slug]?.UP || 0;
+    const sharesDown = state.sideSharesBySlug[slug]?.DOWN || 0;
+
+    if (sharesUp > 0 && pUp < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding UP but pUp=${pUp.toFixed(4)}`);
+    if (sharesDown > 0 && pDown < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding DOWN but pDown=${pDown.toFixed(4)}`);
+
+    // Log Snapshot
     logTickSnapshot({
       ts: Date.now(), symbol: asset.symbol, slug, minsLeft,
-      startPrice, currentPrice, sigmaPerMin: rawSigmaPerMin,
+      startPrice, currentPrice, 
+      sigmaPerMin: rawSigmaPerMin,
       z, pUp, pDown, upAsk, downAsk,
-      sharesUp: state.sideSharesBySlug[slug]?.UP || 0,
-      sharesDown: state.sideSharesBySlug[slug]?.DOWN || 0,
+      sharesUp, sharesDown,
     });
 
     // 6) Decision Gating
     const zMaxTimeBased = dynamicZMax(minsLeft);
     const absZ = Math.abs(z);
 
-    // Dynamic thresholds
     const zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;
     const zMinLateDynamic  = Z_MIN_LATE * regimeScalar;
     const zHugeDynamic     = Z_HUGE * regimeScalar;
 
+    // Gating Log
     if (
       minsLeft > 5 ||
       (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < zHugeDynamic) ||
@@ -357,21 +364,35 @@ async function execForAsset(asset, priceData) {
     ) {
       const evUp = upAsk ? pUp - upAsk : 0;
       const evDown = downAsk ? pDown - downAsk : 0;
-      logger.log(`Skip: |z|=${absZ.toFixed(3)} < Req | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
+      logger.log(`Skip: |z|=${absZ.toFixed(3)} < Req (Huge=${zHugeDynamic.toFixed(2)}, Min=${zMinLateDynamic.toFixed(2)}) | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
       return;
     }
 
-    // 7) Prep Trade Candidates
+    // 7) Trade Logic
     const directionalZMin = minsLeft > MINUTES_LEFT ? zMinEarlyDynamic : zMinLateDynamic;
     let candidates = [];
 
-    if (z >= directionalZMin && upAsk) candidates.push({ side: "UP", ev: pUp - upAsk, ask: upAsk });
-    if (z <= -directionalZMin && downAsk) candidates.push({ side: "DOWN", ev: pDown - downAsk, ask: downAsk });
-    
+    // Detailed Directional Logging
+    if (z >= directionalZMin && upAsk) {
+      const evBuyUp = pUp - upAsk;
+      logger.log(`Up ask=${upAsk.toFixed(3)}, EV buy Up=${evBuyUp.toFixed(4)}`);
+      candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
+    } else {
+      logger.log(`We don't buy Up here (z=${z.toFixed(3)} too small or no ask).`);
+    }
+
+    if (z <= -directionalZMin && downAsk) {
+      const evBuyDown = pDown - downAsk;
+      logger.log(`Down ask=${downAsk.toFixed(3)}, EV buy Down=${evBuyDown.toFixed(4)}`);
+      candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
+    } else {
+      logger.log(`We don't buy Down here (z=${z.toFixed(3)} too small or no ask).`);
+    }
+
     candidates = candidates.filter(c => c.ev > (minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE));
 
     // ============================================================
-    // LATE GAME "ALL-IN-ISH" MODE
+    // LATE GAME MODE
     // ============================================================
     if (absZ > zMaxTimeBased || (minsLeft < 2 && minsLeft > 0.001)) {
       const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
@@ -384,14 +405,13 @@ async function execForAsset(asset, priceData) {
       else if (pDown >= pReq && z < -zMinLateDynamic) { lateSide = "DOWN"; sideProb = pDown; sideAsk = downAsk || 0.99; }
 
       if (lateSide) {
-        // --------- EXTREME SIGNAL (Big Bet) ---------
+        // 1. EXTREME SIGNAL
         if (absZ >= zHugeDynamic && secsLeft <= LATE_GAME_EXTREME_SECS && sideAsk <= LATE_GAME_MAX_PRICE && (sideProb - sideAsk) >= LATE_GAME_MIN_EV) {
           const limitPrice = Math.min(sideAsk, LATE_GAME_MAX_PRICE);
           const maxShares = MAX_SHARES_PER_MARKET[asset.symbol] || 500;
           const bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION);
 
           const capCheck = canPlaceOrder(state, slug, lateSide, bigSize, asset.symbol);
-          
           if (capCheck.ok) {
             logger.log(`EXTREME: Buying ${bigSize} ${lateSide} @ ${limitPrice}`);
             await client.createAndPostOrder({
@@ -400,24 +420,21 @@ async function execForAsset(asset, priceData) {
             }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
             addPosition(state, slug, lateSide, bigSize);
             state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
-            return; // STOP HERE IF EXTREME TRIGGERED
+            return; 
           } else {
-            logger.log(
+             logger.log(
               `Skipping EXTREME; cap hit. (reason=${capCheck.reason}, ` +
-              `totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
-              `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
+              `total=${capCheck.totalBefore}->${capCheck.totalAfter}, ` +
+              `net=${capCheck.netBefore}->${capCheck.netAfter})`
             );
           }
         }
 
-        // --------- HYBRID LAYERED MODEL (RESTORED) ---------
+        // 2. HYBRID LAYERED MODEL
         const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
         const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
 
-        logger.log(
-          `Late game hybrid: side=${lateSide}, ` +
-          `prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`
-        );
+        logger.log(`Late game hybrid: side=${lateSide}, prob=${sideProb.toFixed(4)}, ask=${sideAsk.toFixed(3)}`);
 
         for (let i = 0; i < LAYER_OFFSETS.length; i++) {
           let target = sideAsk + LAYER_OFFSETS[i];
@@ -427,8 +444,8 @@ async function execForAsset(asset, priceData) {
           const minEv = LAYER_MIN_EV[i];
           
           if (ev < minEv) {
-            logger.log(`Layer ${i}: skip @${target.toFixed(2)} (EV=${ev.toFixed(4)} < ${minEv}).`);
-            continue;
+             logger.log(`Layer ${i}: skip @${target.toFixed(2)} (EV=${ev.toFixed(4)} < ${minEv})`);
+             continue; 
           }
 
           let layerRiskBand = "medium";
@@ -436,28 +453,23 @@ async function execForAsset(asset, priceData) {
           else if (sideProb <= PROB_MAX_RISKY && target <= PRICE_MAX_RISKY) layerRiskBand = "risky";
 
           const layerSize = sizeForTrade(ev, minsLeft, { minEdgeOverride: 0.0, riskBand: layerRiskBand });
-
           if (layerSize <= 0) {
-            logger.log(`Late layer ${i}: size <= 0 (ev=${ev.toFixed(4)}), skipping.`);
-            continue;
+             logger.log(`Late layer ${i}: size <= 0, skipping.`);
+             continue;
           }
 
           const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
           if (!capCheck.ok) {
-             // Verbose failure logging as requested
             logger.log(
-              `Skipping layer ${i}; cap hit and not hedging. ` +
-              `(reason=${capCheck.reason}, totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
-              `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
+              `Layer ${i} skip; cap hit. (reason=${capCheck.reason}, ` +
+              `total=${capCheck.totalBefore}->${capCheck.totalAfter}, ` +
+              `net=${capCheck.netBefore}->${capCheck.netAfter})`
             );
             continue;
           }
-
+          
           if (capCheck.reason === "hedge_beyond_cap") {
-            logger.log(
-              `Layer ${i} allowed beyond cap because it reduces net exposure. ` +
-              `(net ${capCheck.netBefore} -> ${capCheck.netAfter}, total ${capCheck.totalBefore} -> ${capCheck.totalAfter})`
-            );
+             logger.log(`Layer ${i} allowed beyond cap (hedge).`);
           }
 
           const limitPrice = Number(target.toFixed(2));
@@ -465,31 +477,26 @@ async function execForAsset(asset, priceData) {
 
           try {
             const resp = await client.createAndPostOrder({
-                tokenID: lateSide === "UP" ? upTokenId : downTokenId,
-                price: limitPrice.toFixed(2),
-                side: Side.BUY,
-                size: layerSize,
-                expiration: String(expiresAt),
-              },
-              { tickSize: "0.01", negRisk: false },
-              OrderType.GTD
-            );
+              tokenID: lateSide === "UP" ? upTokenId : downTokenId,
+              price: limitPrice.toFixed(2), side: Side.BUY, size: layerSize, expiration: String(expiresAt)
+            }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
+            
             logger.log(`LATE LAYER ${i} RESP:`, resp);
-            state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
             addPosition(state, slug, lateSide, layerSize);
+            state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
           } catch (err) {
-            logger.log(`Error placing late layer ${i}:`, err?.message || err);
+            logger.log(`Error layer ${i}:`, err?.message || err);
           }
         }
       }
     }
-    // ============================================================
-    // END LATE GAME
-    // ============================================================
 
     // --- Normal Entry ---
-    if (!candidates.length) return;
-    
+    if (!candidates.length) {
+      logger.log("No trade candidates with positive EV.");
+      return;
+    }
+
     const best = candidates.reduce((a, b) => a.ev > b.ev ? a : b);
     
     let riskBand = "medium";
@@ -503,19 +510,20 @@ async function execForAsset(asset, priceData) {
     const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
     if (!capCheck.ok) { 
       logger.log(
-        `Skipping normal trade; cap hit. (reason=${capCheck.reason}, ` +
-        `totalBefore=${capCheck.totalBefore}, totalAfter=${capCheck.totalAfter}, ` +
-        `netBefore=${capCheck.netBefore}, netAfter=${capCheck.netAfter})`
+        `Skip normal trade; cap hit. (reason=${capCheck.reason}, ` +
+        `total=${capCheck.totalBefore}->${capCheck.totalAfter}, ` +
+        `net=${capCheck.netBefore}->${capCheck.netAfter})`
       );
       return; 
     }
 
     logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size})`);
-    await client.createAndPostOrder({
+    const resp = await client.createAndPostOrder({
       tokenID: best.side === "UP" ? upTokenId : downTokenId,
       price: best.ask.toFixed(2), side: Side.BUY, size, expiration: String(Math.floor(Date.now()/1000)+900)
     }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
-
+    
+    logger.log(`ORDER RESP:`, resp);
     addPosition(state, slug, best.side, size);
     state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + size;
 
@@ -562,7 +570,7 @@ async function execAll() {
   console.log("=== TICK END ===");
 }
 
-// === NEW STARTUP LOGIC ===
+// === STARTUP & SCHEDULER ===
 (async () => {
   console.log("Initializing Bot...");
 
