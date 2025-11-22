@@ -408,20 +408,28 @@ async function execForAsset(asset, priceData) {
         
     // If market is quiet (scalar near 1.0), reduce required edge by up to 40%
     if (regimeScalar <= 1.1) {
-      dynamicMinEdge = dynamicMinEdge * 0.6; 
+      dynamicMinEdge = dynamicMinEdge * 0.6;
       // e.g. 0.03 becomes 0.018 (1.8% edge)
     }
     // OPTIMIZATION: Demand higher edge for "risky" assets or lower prob trades
     if (asset.symbol === "SOL") {
       dynamicMinEdge += 0.02; // Require +2% extra edge for SOL
     }
-    const prob = best.side === "UP" ? pUp : pDown;
-    if (prob < 0.90) {
-      dynamicMinEdge = Math.max(dynamicMinEdge, 0.05); 
-    }
 
     logger.log(`Min Edge Required: ${dynamicMinEdge.toFixed(4)} (Scalar: ${regimeScalar.toFixed(2)})`);
-    candidates = candidates.filter(c => c.ev > dynamicMinEdge);
+    candidates = candidates.filter(c => {
+      let required = dynamicMinEdge;
+      
+      // Determine probability for this candidate
+      const cProb = c.side === "UP" ? pUp : pDown;
+      
+      // If signal is weak (<90%), demand 5% edge
+      if (cProb < 0.90) {
+        required = Math.max(required, 0.05);
+      }
+      
+      return c.ev > required;
+    });
 
     // ============================================================
     // LATE GAME MODE
