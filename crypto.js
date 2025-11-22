@@ -46,7 +46,7 @@ const MIN_EDGE_EARLY = 0.05;
 const MIN_EDGE_LATE  = 0.03;
 
 // Base z-thresholds (Will be scaled by Regime Scalar)
-const Z_MIN_EARLY = 0.9;
+const Z_MIN_EARLY = 1.0;
 const Z_MIN_LATE  = 0.7;
 
 // Limits for dynamicZMax (time-based)
