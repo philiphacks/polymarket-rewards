@@ -38,6 +38,13 @@ const ASSETS = [
   { symbol: "XRP", slugPrefix: "xrp", pythId: "0xec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8" },
 ];
 
+const BASIS_BUFFER_BPS = {
+  BTC: 5,   // 0.05% (~$45 at $90k)
+  ETH: 6,   // 0.06%
+  SOL: 7,  // 0.06%
+  XRP: 7
+};
+
 const MAX_SHARES_PER_MARKET = { BTC: 600, ETH: 300, SOL: 300, XRP: 200 };
 
 // Time / z thresholds
@@ -360,6 +367,14 @@ async function execForAsset(asset, priceData) {
     // 6) Decision Gating
     const zMaxTimeBased = dynamicZMax(minsLeft);
     const absZ = Math.abs(z);
+
+    const distBps = (Math.abs(currentPrice - startPrice) / startPrice) * 10000;
+    const minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
+
+    if (minsLeft < 2 && distBps < minSafeDist) {
+      logger.log(`🚫 BASIS RISK: Price too close to strike. Dist: ${distBps.toFixed(1)}bps < Safe: ${minSafeDist}bps. Skipping.`);
+      return;
+    }
 
     // --- STEP 3: DYNAMIC Z-THRESHOLD SCALING ---
     let zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;

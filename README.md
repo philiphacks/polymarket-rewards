@@ -412,3 +412,55 @@ A reasonable next step configuration might be:
   - Use `LAYER_MIN_EV` like `[0.010, 0.005, 0.000]`.  
 
 That should give you **meaningfully more trades per hour** while still being fairly conservative and keeping individual losses under control.
+
+
+# Minimum Data Set Size
+
+For a high-frequency strategy like the Moneytron (15-minute expiries), **"Number of Days" matters less than "Variety of Regimes."**
+
+Trading 30 days of a flat "crab" market will not tell you if your bot survives a flash crash. Conversely, testing only on a pump day will give you a false sense of confidence about your win rate.
+
+Here is the breakdown of how much data you need and **why**.
+
+### 1. The Minimum Viable Dataset: **7 Days (Include a Weekend)**
+Since you are trading 15-minute markets across 4 assets, you get a massive number of observations quickly.
+*   4 Assets $\times$ 96 Markets/Day = **384 Market Cycles per Day**.
+*   In 7 days, that is **~2,688 Market Cycles**.
+
+**Why 7 Days?**
+*   **The Weekend Factor:** Crypto liquidity drops significantly on Sat/Sun. Spreads widen, and volatility dampens. Your "Low Volatility" logic (`regimeScalar < 1.2`) needs to be stress-tested here.
+*   **The Weekday Factor:** You need Tuesday/Wednesday trading hours (US Open/Close) to test high-volume execution and "slam" windows.
+
+### 2. The Ideal Robust Dataset: **14 to 21 Days**
+This is the "Sweet Spot" for HFT optimization.
+
+**Why? Statistical Significance in Buckets.**
+Recall our `runDeepAnalysis` output. We split trades into buckets (e.g., `0.85-0.90` probability).
+*   In your 1-day test, you had ~300 trades in one bucket. That is decent.
+*   However, specific edge cases like **"Late Game (2m left) + SOL + High Volatility"** might only happen 3 times a day.
+*   To trust your `Z_MIN_LATE` settings, you need at least **100 trades** in that specific, dangerous sub-bucket. Two to three weeks gets you there.
+
+### 3. The "Regime" Checklist
+Do not just pick the last 14 days sequentially. If the last 14 days were all bullish, your data is biased. Ensure your logs cover these four scenarios:
+
+1.  **The Grind (Low Vol):** Price ranges <1% for 12 hours. (Tests your fee/spread efficiency).
+2.  **The Pump/Dump (High Vol):** BTC moves >3% in an hour. (Tests your `Z_MAX` / counter-trend safety).
+3.  **The Mean Reversion (Chop):** Price spikes up and immediately comes back down. (This is where Moneytron makes the most money).
+4.  **The Trend (Drift):** Price goes up, pauses, goes up, pauses. (This is where Moneytron loses money by betting on reversion that never comes).
+
+### How to Manage the Data
+Since you are logging to `jsonl` files, these get large fast.
+
+**Do not run one massive `backtest.js` on a 1GB file.** Node.js will run out of memory or become slow.
+
+**Recommended Workflow:**
+1.  **Log Daily:** Keep your `ticks-YYYYMMDD.jsonl` separate.
+2.  **Analyze Weekly:** Create a script to run the backtest on 7 files sequentially and aggregate the `totalPnL` and `winRate`.
+3.  **Targeted Forensics:** If you lose money on a specific day, run the backtest on *just that day* with `verbose: true` to see exactly why.
+
+### Summary
+*   **Current Status:** 1-3 days is enough to verify the code works and the logic is sound (Alpha check).
+*   **Optimization Phase:** Collect **1 full week** (including Sat/Sun) before increasing your position size significantly.
+*   **Final Form:** Keep a rolling window of the last **14 days** to constantly retune your `MIN_VOL_BPS` floors as the market personality changes.
+
+
