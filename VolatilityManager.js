@@ -4,14 +4,17 @@ const HISTORY_FILE = "vol_history.json";
 const WINDOW_SIZE = 60; 
 const MIN_DATA_POINTS = 10; 
 
-const FALLBACK_SIGMA_USD = {
-  BTC: 70,
-  ETH: 4.0,
-  SOL: 0.20,
-  XRP: 0.0035,
+// 1 Basis Point (bps) = 0.01% = 0.0001
+// These are the "Minimum Volatility" floors in Basis Points per Minute.
+// If realized vol drops below this, we assume this floor to prevent noise trading.
+const MIN_VOL_BPS = {
+  BTC: 3.5,  // ~0.035% per minute (At $95k, this is ~$33)
+  ETH: 4.0,  // ~0.04% per minute
+  SOL: 6.0,  // ~0.06% per minute (Higher beta than BTC)
+  XRP: 6.0,  // ~0.06% per minute
 };
 
-// Map your symbols to Binance pairs
+// Map your symbols to Binance pairs for backfill
 const BINANCE_PAIRS = {
   BTC: "BTCUSDT",
   ETH: "ETHUSDT",
@@ -56,37 +59,61 @@ function updatePriceHistory(symbol, price) {
   saveHistory();
 }
 
+/**
+ * Calculates Realized Volatility (Standard Deviation of Log Returns).
+ * Enforces a dynamic floor based on Basis Points (BPS).
+ */
 function getRealizedVolatility(symbol, currentPrice) {
   const data = history[symbol];
+  
+  // Calculate the Dynamic Floor in USD
+  const bps = MIN_VOL_BPS[symbol] || 5.0; // Default 5bps if symbol unknown
+  const dynamicFloorUSD = currentPrice * (bps / 10000);
+
   if (!data || data.length < MIN_DATA_POINTS) {
-    return FALLBACK_SIGMA_USD[symbol];
+    return dynamicFloorUSD;
   }
 
   const returns = [];
   for (let i = 1; i < data.length; i++) {
+    // Log Return: ln(P_t / P_t-1)
     const r = Math.log(data[i].price / data[i-1].price);
     returns.push(r);
   }
 
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
-  const stdDevReturns = Math.sqrt(variance);
+  const stdDevReturns = Math.sqrt(variance); // This is % volatility
   
-  return Math.max(currentPrice * stdDevReturns, FALLBACK_SIGMA_USD[symbol]);
+  const calculatedSigmaUSD = currentPrice * stdDevReturns;
+
+  // Return the higher of Realized Vol or the BPS Floor
+  return Math.max(calculatedSigmaUSD, dynamicFloorUSD);
 }
 
 function getVolRegimeRatio(symbol, currentSigmaUSD) {
-  const floor = FALLBACK_SIGMA_USD[symbol];
-  if (!floor) return 1;
-  return currentSigmaUSD / floor;
+  // We need to reconstruct the floor to calculate the ratio
+  // Ratio = CurrentSigma / Floor
+  // If Ratio is 1.0, we are at the floor (Low Vol)
+  // If Ratio is 3.0, we are 3x above the floor (High Vol)
+  
+  const data = history[symbol];
+  const lastPrice = data && data.length > 0 ? data[data.length - 1].price : 0;
+  
+  if (lastPrice === 0) return 1.0;
+
+  const bps = MIN_VOL_BPS[symbol] || 5.0;
+  const dynamicFloorUSD = lastPrice * (bps / 10000);
+  
+  if (dynamicFloorUSD === 0) return 1.0;
+
+  return currentSigmaUSD / dynamicFloorUSD;
 }
 
-// --- NEW: BACKFILL FUNCTION ---
 async function backfillHistory(symbols) {
   console.log("[VOL] Starting history backfill from Binance...");
   
   const promises = symbols.map(async (symbol) => {
-    // 1. Check if we already have fresh data (less than 2 mins old)
     if (history[symbol] && history[symbol].length > 50) {
       const lastTs = history[symbol][history[symbol].length - 1].ts;
       if (Date.now() - lastTs < 120 * 1000) {
@@ -95,26 +122,20 @@ async function backfillHistory(symbols) {
       }
     }
 
-    // 2. Fetch from Binance
     const pair = BINANCE_PAIRS[symbol];
     if (!pair) return;
 
     try {
-      // Fetch last 60 1m candles
       const url = `https://api.binance.com/api/v3/klines?symbol=${pair}&interval=1m&limit=${WINDOW_SIZE}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(res.statusText);
       
       const klines = await res.json();
-      
-      // 3. Parse (Binance format: [openTime, open, high, low, close, ...])
-      // We use Close Price (index 4) and Close Time (index 6)
       const cleanData = klines.map(k => ({
-        ts: k[6],         // Close time (ms)
-        price: parseFloat(k[4]) // Close price
+        ts: k[6],
+        price: parseFloat(k[4])
       }));
 
-      // 4. Overwrite history
       history[symbol] = cleanData;
       console.log(`[VOL] Backfilled ${symbol}: ${cleanData.length} candles.`);
       
@@ -128,12 +149,11 @@ async function backfillHistory(symbols) {
   console.log("[VOL] Backfill complete.");
 }
 
-// Initialize
 loadHistory();
 
 export const VolatilityManager = {
   updatePriceHistory,
   getRealizedVolatility,
   getVolRegimeRatio,
-  backfillHistory // Exported
+  backfillHistory
 };
