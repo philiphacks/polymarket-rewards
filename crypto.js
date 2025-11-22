@@ -1,4 +1,13 @@
-// Version 1.3 (Verbose Logging Restored)
+// Version 2.0 - Refactored with Quant Improvements
+// Key Changes:
+// - Student's t-distribution for fat tails
+// - Drift estimation for directional bias
+// - Fixed time decay (increases near expiry)
+// - Inverted regime logic (lower z in high vol)
+// - Kelly criterion sizing for extreme trades
+// - Order fill tracking with auto-cancel
+// - Correlation-aware position limits
+// - Better error handling
 
 import 'dotenv/config';
 import cron from "node-cron";
@@ -19,6 +28,7 @@ function createScopedLogger(symbol) {
   return {
     log: (...args) => logs.push(`[${symbol}] ${formatArgs(args)}`),
     error: (...args) => logs.push(`[${symbol}] [ERROR] ${formatArgs(args)}`),
+    warn: (...args) => logs.push(`[${symbol}] [WARN] ${formatArgs(args)}`),
     flush: () => {
       if (logs.length === 0) return;
       console.log(`\n--- START ${symbol} LOGS ---`);
@@ -41,31 +51,40 @@ const ASSETS = [
 const BASIS_BUFFER_BPS = {
   BTC: 5,   // 0.05% (~$45 at $90k)
   ETH: 6,   // 0.06%
-  SOL: 7,  // 0.06%
+  SOL: 7,   // 0.07%
   XRP: 7
 };
 
 const MAX_SHARES_PER_MARKET = { BTC: 600, ETH: 300, SOL: 300, XRP: 200 };
 
-// Time / z thresholds
+// Correlation matrix (for position limits)
+const CORRELATION_MATRIX = {
+  'BTC-ETH': 0.70,
+  'BTC-SOL': 0.60,
+  'BTC-XRP': 0.55,
+  'ETH-SOL': 0.65,
+  'ETH-XRP': 0.50,
+  'SOL-XRP': 0.45
+};
+
+// Time / edge thresholds
 const MINUTES_LEFT = 3;
 const MIN_EDGE_EARLY = 0.05;
 const MIN_EDGE_LATE  = 0.03;
 
-// Base z-thresholds (Will be scaled by Regime Scalar)
+// Base z-thresholds (Now INVERTED - will be divided by regime scalar)
 const Z_MIN_EARLY = 1.0;
 const Z_MIN_LATE  = 0.7;
 
-// Limits for dynamicZMax (time-based)
+// Limits for dynamicZMax (time-based momentum filter)
 const Z_MAX_FAR_MINUTES = 6;
 const Z_MAX_NEAR_MINUTES = 3;
 const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
 
 // Extreme late-game constants
-const Z_HUGE = 4.0; // Will also be scaled by Regime Scalar
+const Z_HUGE = 4.0;
 const LATE_GAME_EXTREME_SECS = 8;
-const LATE_GAME_MAX_FRACTION = 0.3;
 const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.98;
 
@@ -73,6 +92,10 @@ const LATE_GAME_MAX_PRICE = 0.98;
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
 const PRICE_MAX_RISKY = 0.90; const PROB_MAX_RISKY  = 0.95;
 const MAX_REL_DIFF = 0.05;
+
+// Order tracking
+const ORDER_MONITOR_MS = 30000; // 30 seconds to fill
+const pendingOrders = new Map(); // orderID -> { asset, side, size, timestamp }
 
 // CLOB
 const CLOB_HOST = "https://clob.polymarket.com";
@@ -84,6 +107,149 @@ const signer = new Wallet(process.env.PRIVATE_KEY);
 const creds = await new ClobClient(CLOB_HOST, CHAIN_ID, signer).createOrDeriveApiKey();
 console.log("Address:", await signer.getAddress());
 const client = new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, SIGNATURE_TYPE, FUNDER);
+
+// ---------- STATISTICAL FUNCTIONS ----------
+
+// Student's t-distribution CDF (df = 5 for fat tails)
+function studentTCdf(t, df = 5) {
+  if (df <= 0) throw new Error("df must be positive");
+  
+  const x = df / (t * t + df);
+  const a = df / 2;
+  const b = 0.5;
+  
+  // Incomplete beta approximation
+  let beta;
+  if (x < 0 || x > 1) return t > 0 ? 1 : 0;
+  
+  // Simple approximation for beta function
+  const terms = 20;
+  let sum = 0;
+  for (let i = 0; i < terms; i++) {
+    const coef = Math.exp(
+      a * Math.log(x) + 
+      b * Math.log(1 - x) + 
+      i * Math.log(1 - x) - 
+      Math.log(b + i)
+    );
+    sum += coef;
+  }
+  beta = sum;
+  
+  const result = 0.5 + 0.5 * (t > 0 ? 1 : -1) * (1 - beta);
+  return Math.max(0, Math.min(1, result));
+}
+
+// Normal CDF (fallback)
+function normCdf(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989423 * Math.exp(-0.5 * z * z);
+  let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  if (z > 0) p = 1 - p;
+  return p;
+}
+
+// Drift estimation (linear regression on recent prices)
+const driftCache = {}; // symbol -> { drift, lastUpdate }
+
+function estimateDrift(symbol, windowMinutes = 60) {
+  const now = Date.now();
+  
+  // Use cached if < 5 minutes old
+  if (driftCache[symbol] && now - driftCache[symbol].lastUpdate < 300000) {
+    return driftCache[symbol].drift;
+  }
+  
+  const history = VolatilityManager.getPriceHistory(symbol, windowMinutes);
+  if (!history || history.length < 10) return 0;
+  
+  // Linear regression: price = a + b*time
+  const n = history.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  
+  for (let i = 0; i < n; i++) {
+    const x = i; // time index
+    const y = Math.log(history[i].price); // log returns
+    sumX += x;
+    sumY += y;
+    sumXY += x * y;
+    sumX2 += x * x;
+  }
+  
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  
+  // Convert to drift per minute (annualized then scaled)
+  const driftPerMinute = slope * history[0].price;
+  
+  driftCache[symbol] = { drift: driftPerMinute, lastUpdate: now };
+  return driftPerMinute;
+}
+
+// Kelly Criterion for position sizing
+function kellySize(prob, price, maxShares, fraction = 0.25) {
+  if (price >= 1 || price <= 0) return 0;
+  
+  const odds = 1 / price - 1;
+  const kelly = (prob * odds - (1 - prob)) / odds;
+  
+  // Use fractional Kelly (quarter Kelly for safety)
+  const size = Math.max(0, kelly * fraction * maxShares);
+  return Math.min(size, maxShares);
+}
+
+// Correlation-adjusted position limit check
+function checkCorrelationRisk(state, newSymbol, newSide, newSize) {
+  const positions = {};
+  
+  // Collect all current positions
+  for (const [sym, st] of Object.entries(stateBySymbol)) {
+    if (!st || !st.sideSharesBySlug) continue;
+    const slug = st.slug;
+    const pos = st.sideSharesBySlug[slug];
+    if (!pos) continue;
+    
+    const net = (pos.UP || 0) - (pos.DOWN || 0);
+    if (net !== 0) positions[sym] = net;
+  }
+  
+  // Add proposed position
+  const proposedNet = (positions[newSymbol] || 0) + (newSide === 'UP' ? newSize : -newSize);
+  positions[newSymbol] = proposedNet;
+  
+  // Calculate correlation-adjusted exposure
+  let totalRisk = 0;
+  const symbols = Object.keys(positions);
+  
+  for (let i = 0; i < symbols.length; i++) {
+    for (let j = 0; j < symbols.length; j++) {
+      const sym1 = symbols[i];
+      const sym2 = symbols[j];
+      
+      const pos1 = positions[sym1] || 0;
+      const pos2 = positions[sym2] || 0;
+      
+      let corr = 1.0;
+      if (sym1 !== sym2) {
+        const key = [sym1, sym2].sort().join('-');
+        corr = CORRELATION_MATRIX[key] || 0.5; // default to 0.5
+      }
+      
+      totalRisk += pos1 * pos2 * corr;
+    }
+  }
+  
+  const portfolioStd = Math.sqrt(Math.max(0, totalRisk));
+  
+  // Risk limit: 3x average single-asset limit
+  const avgLimit = Object.values(MAX_SHARES_PER_MARKET).reduce((a, b) => a + b, 0) / Object.keys(MAX_SHARES_PER_MARKET).length;
+  const riskLimit = avgLimit * 3;
+  
+  return {
+    ok: portfolioStd <= riskLimit,
+    portfolioRisk: portfolioStd,
+    limit: riskLimit
+  };
+}
 
 // ---------- UTILS ----------
 
@@ -119,15 +285,19 @@ function cryptoPriceUrl({ symbol, date = new Date(), variant = "fifteen" }) {
   return `https://polymarket.com/api/crypto/crypto-price?${params.toString()}`;
 }
 
-function normCdf(z) {
-  const t = 1 / (1 + 0.2316419 * Math.abs(z));
-  const d = 0.3989423 * Math.exp(-0.5 * z * z);
-  let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-  if (z > 0) p = 1 - p;
-  return p;
+// FIXED: Time decay now INCREASES volatility near expiry (gamma risk)
+function getTimeDecayFactor(minsLeft) {
+  if (minsLeft >= 1) return 1.0;
+  
+  const secsLeft = minsLeft * 60;
+  if (secsLeft >= 30) return 1.0;
+  
+  // Increase vol by up to 40% in final 30 seconds
+  const t = Math.max(0, Math.min(1, (30 - secsLeft) / 30));
+  return 1.0 + t * 0.4; // 1.0 -> 1.4
 }
 
-// This handles TIME based Z-Max (for the "Don't trade against momentum early" logic)
+// Time-based momentum filter (unchanged)
 function dynamicZMax(minsLeft) {
   if (minsLeft >= Z_MAX_FAR_MINUTES) return Z_MAX_FAR;
   if (minsLeft <= Z_MAX_NEAR_MINUTES) return Z_MAX_NEAR;
@@ -179,13 +349,12 @@ function requiredLateProb(secsLeft) {
   return pHigh + (pLow - pHigh) * t;
 }
 
-// Approximate US "slam" window
 function isInSlamWindow(date = new Date()) {
   const totalMins = date.getUTCHours() * 60 + date.getUTCMinutes();
   return totalMins >= 14 * 60 + 45 && totalMins < 15 * 60;
 }
 
-// Logging (File IO)
+// Logging
 function logTickSnapshot(snapshot) {
   try {
     const d = new Date(snapshot.ts);
@@ -224,17 +393,66 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
   return Math.min(size, ABS_MAX);
 }
 
-// New Helper: replaces effectiveSigmaPerMin from V1.0
-function getTimeDecayFactor(minsLeft) {
-  if (minsLeft >= 1) return 1.0;
-  const secsLeft = minsLeft * 60;
-  if (secsLeft >= 30) return 1.0;
-  const t = Math.max(0, Math.min(1, (30 - secsLeft) / 30));
-  return 1 - t * (1 - 0.6);
+// ---------- ORDER MONITORING ----------
+
+async function monitorAndCancelOrder(orderID, asset, side, size, logger) {
+  const startTime = Date.now();
+  
+  try {
+    while (Date.now() - startTime < ORDER_MONITOR_MS) {
+      await sleep(5000); // Check every 5 seconds
+      
+      try {
+        const order = await client.getOrder(orderID);
+        
+        if (!order) {
+          logger.warn(`Order ${orderID} not found`);
+          break;
+        }
+        
+        // Check if filled
+        const sizeFilled = Number(order.size_matched || 0);
+        if (sizeFilled >= size * 0.95) { // 95% filled = success
+          logger.log(`✅ Order ${orderID} filled: ${sizeFilled}/${size}`);
+          pendingOrders.delete(orderID);
+          return { filled: true, sizeFilled };
+        }
+        
+        // Check if cancelled or failed
+        if (order.status === 'CANCELLED' || order.status === 'FAILED') {
+          logger.warn(`Order ${orderID} ${order.status}`);
+          pendingOrders.delete(orderID);
+          return { filled: false, status: order.status };
+        }
+        
+      } catch (err) {
+        logger.error(`Error checking order ${orderID}: ${err.message}`);
+      }
+    }
+    
+    // Timeout - cancel the order
+    logger.warn(`⏱️ Order ${orderID} timeout after ${ORDER_MONITOR_MS}ms - cancelling`);
+    
+    try {
+      await client.cancelOrder(orderID);
+      logger.log(`Cancelled order ${orderID}`);
+    } catch (cancelErr) {
+      logger.error(`Failed to cancel ${orderID}: ${cancelErr.message}`);
+    }
+    
+    pendingOrders.delete(orderID);
+    return { filled: false, status: 'TIMEOUT' };
+    
+  } catch (err) {
+    logger.error(`Monitor error for ${orderID}: ${err.message}`);
+    pendingOrders.delete(orderID);
+    return { filled: false, status: 'ERROR' };
+  }
 }
 
 // ---------- STATE & EXECUTION ----------
 const stateBySymbol = {};
+const executionLock = {}; // Prevent race conditions
 
 function ensureState(asset) {
   if (!stateBySymbol[asset.symbol]) {
@@ -257,6 +475,14 @@ function ensureState(asset) {
 async function execForAsset(asset, priceData) {
   const logger = createScopedLogger(asset.symbol);
 
+  // Prevent concurrent execution
+  if (executionLock[asset.symbol]) {
+    logger.log("Skipping - already executing");
+    return;
+  }
+  
+  executionLock[asset.symbol] = true;
+
   try {
     const state = ensureState(asset);
     if (state.resetting) return;
@@ -267,7 +493,10 @@ async function execForAsset(asset, priceData) {
     // 1) Gamma Meta
     if (!state.marketMeta || state.marketMeta.slug !== slug) {
       const gammaRes = await fetch(gammaUrl);
-      if (!gammaRes.ok) { logger.log(`Gamma failed: ${gammaRes.status}`); return; }
+      if (!gammaRes.ok) { 
+        logger.error(`Gamma failed: ${gammaRes.status}`); 
+        return; 
+      }
       const market = await gammaRes.json();
       state.marketMeta = {
         id: market.id, slug, question: market.question,
@@ -287,7 +516,7 @@ async function execForAsset(asset, priceData) {
       state.resetting = true;
       logger.log(`Interval over. Resetting...`);
       await sleep(30_000);
-      stateBySymbol[asset.symbol] = null; // Force clean reset
+      stateBySymbol[asset.symbol] = null;
       return;
     }
     if (isInSlamWindow()) return;
@@ -299,14 +528,23 @@ async function execForAsset(asset, priceData) {
       startPrice = Number(state.cpData.openPrice);
     } else {
       const cpRes = await fetch(cryptoPriceUrl);
-      if (cpRes.status === 429) { await sleep(3000); return; }
-      if (!cpRes.ok) return;
+      if (cpRes.status === 429) { 
+        await sleep(3000); 
+        return; 
+      }
+      if (!cpRes.ok) {
+        logger.error(`Crypto price API failed: ${cpRes.status}`);
+        return;
+      }
       const cp = await cpRes.json();
       if (Number(cp.openPrice) > 0) {
         state.cpData = { ...cp, _cachedAt: Date.now() };
         startPrice = Number(cp.openPrice);
         logger.log(`Start Price cached: ${startPrice}`);
-      } else return;
+      } else {
+        logger.error(`Invalid openPrice: ${cp.openPrice}`);
+        return;
+      }
     }
 
     // 3) Current Price & Sanity
@@ -318,33 +556,47 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    // 4) Volatility & Math (Merged Logic)
+    // 4) Volatility & Drift (NEW)
     let rawSigmaPerMin = VolatilityManager.getRealizedVolatility(asset.symbol, currentPrice);
+    const drift = estimateDrift(asset.symbol, 60);
+    
     const effectiveSigma = rawSigmaPerMin * getTimeDecayFactor(minsLeft);
     const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
+    
+    // FIXED: Regime scalar now DIVIDES thresholds (high vol = lower barrier)
     const regimeScalar = Math.sqrt(volRatio);
 
     const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
-    const z = (currentPrice - startPrice) / sigmaT;
-    const pUp = normCdf(z);
+    
+    // Include drift in z-score calculation
+    const z = (currentPrice - startPrice - drift * minsLeft) / sigmaT;
+    
+    // Use Student's t-distribution for fat tails
+    const tScore = z / Math.sqrt(1 + z * z / 5); // Convert to t-score with df=5
+    const pUp = studentTCdf(tScore, 5);
     const pDown = 1 - pUp;
 
     logger.log(
       `σ_raw: $${rawSigmaPerMin.toFixed(4)} (Ratio: ${volRatio.toFixed(2)}x) | ` +
-      `Scalar: ${regimeScalar.toFixed(2)}x | z: ${z.toFixed(3)}`
+      `Drift: $${drift.toFixed(4)}/min | Scalar: ${regimeScalar.toFixed(2)}x | z: ${z.toFixed(3)}`
     );
 
     // 5) Order Books
     const [upTokenId, downTokenId] = tokenIds;
-    const [upBook, downBook] = await Promise.all([client.getOrderBook(upTokenId), client.getOrderBook(downTokenId)]);
+    const [upBook, downBook] = await Promise.all([
+      client.getOrderBook(upTokenId), 
+      client.getOrderBook(downTokenId)
+    ]);
     const { bestAsk: upAsk } = getBestBidAsk(upBook);
     const { bestAsk: downAsk } = getBestBidAsk(downBook);
 
-    // --- Verbose Logs ---
     const mid = (upAsk && downAsk) ? (upAsk + downAsk) / 2 : (upAsk || downAsk);
     logger.log(`Up ask / Down ask: ${upAsk?.toFixed(3) ?? 'n/a'} / ${downAsk?.toFixed(3) ?? 'n/a'}, mid≈${mid?.toFixed(3) ?? 'n/a'}`);
 
-    if (!upAsk && !downAsk) { logger.log("No asks."); return; }
+    if (!upAsk && !downAsk) { 
+      logger.log("No asks."); 
+      return; 
+    }
 
     const existingSide = getExistingSide(state, slug);
     logger.log(`Existing net side: ${existingSide || "FLAT"}`);
@@ -360,11 +612,12 @@ async function execForAsset(asset, priceData) {
       ts: Date.now(), symbol: asset.symbol, slug, minsLeft,
       startPrice, currentPrice, 
       sigmaPerMin: rawSigmaPerMin,
+      drift,
       z, pUp, pDown, upAsk, downAsk,
       sharesUp, sharesDown,
     });
 
-    // 6) Decision Gating
+    // 6) Decision Gating with Basis Risk Check
     const zMaxTimeBased = dynamicZMax(minsLeft);
     const absZ = Math.abs(z);
 
@@ -376,24 +629,20 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    // --- STEP 3: DYNAMIC Z-THRESHOLD SCALING ---
-    let zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;
-    let zMinLateDynamic  = Z_MIN_LATE * regimeScalar;
-    let zHugeDynamic     = Z_HUGE * regimeScalar;
+    // FIXED: Z-thresholds now DIVIDED by regime scalar (high vol = lower barriers)
+    let zMinEarlyDynamic = Z_MIN_EARLY / Math.max(0.5, regimeScalar);
+    let zMinLateDynamic  = Z_MIN_LATE / Math.max(0.5, regimeScalar);
+    let zHugeDynamic     = Z_HUGE / Math.max(0.5, regimeScalar);
 
-    // LOW VOLATILITY ADJUSTMENT:
-    // If the regime is "calm" (scalar < 1.2), mean reversion is safer.
-    // We lower the Z-barriers by 15% to get active in the chop.
-    if (regimeScalar < 1.2) {
-      const LOW_VOL_DISCOUNT = 0.85; // Reduce req by 15%
-      zMinEarlyDynamic *= LOW_VOL_DISCOUNT;
-      zMinLateDynamic  *= LOW_VOL_DISCOUNT;
-      // We keep Z_HUGE mostly intact or reduce slightly, as "Extreme" still needs to be extreme
-      zHugeDynamic     *= 0.95; 
+    // Additional low-vol adjustment (if scalar < 1.0, we're in calm market)
+    if (regimeScalar < 1.0) {
+      const LOW_VOL_BOOST = 0.85; // Further reduce barriers by 15%
+      zMinEarlyDynamic *= LOW_VOL_BOOST;
+      zMinLateDynamic  *= LOW_VOL_BOOST;
+      zHugeDynamic     *= 0.90;
       
-      logger.log(`[Low Vol Regime] Reducing Z-thresholds by 15%. New Early/Late: ${zMinEarlyDynamic.toFixed(2)} / ${zMinLateDynamic.toFixed(2)}`);
+      logger.log(`[Low Vol Regime] Further reducing Z-thresholds. New Early/Late: ${zMinEarlyDynamic.toFixed(2)} / ${zMinLateDynamic.toFixed(2)}`);
     }
-    // -------------------------------------------
 
     // Gating Log
     if (
@@ -407,11 +656,10 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    // 7) Trade Logic
+    // 7) Trade Logic - Directional
     const directionalZMin = minsLeft > MINUTES_LEFT ? zMinEarlyDynamic : zMinLateDynamic;
     let candidates = [];
 
-    // Detailed Directional Logging
     if (z >= directionalZMin && upAsk) {
       const evBuyUp = pUp - upAsk;
       logger.log(`Up ask=${upAsk.toFixed(3)}, EV buy Up=${evBuyUp.toFixed(4)}`);
@@ -428,26 +676,25 @@ async function execForAsset(asset, priceData) {
       logger.log(`We don't buy Down here (z=${z.toFixed(3)} too small or no ask).`);
     }
 
+    // Dynamic edge requirements
     let dynamicMinEdge = (minsLeft > MINUTES_LEFT ? MIN_EDGE_EARLY : MIN_EDGE_LATE);
         
-    // If market is quiet (scalar near 1.0), reduce required edge by up to 40%
+    // Low vol adjustment
     if (regimeScalar <= 1.1) {
       dynamicMinEdge = dynamicMinEdge * 0.6;
-      // e.g. 0.03 becomes 0.018 (1.8% edge)
     }
-    // OPTIMIZATION: Demand higher edge for "risky" assets or lower prob trades
+    
+    // Asset-specific adjustments
     if (asset.symbol === "SOL") {
-      dynamicMinEdge += 0.02; // Require +2% extra edge for SOL
+      dynamicMinEdge += 0.02;
     }
 
     logger.log(`Min Edge Required: ${dynamicMinEdge.toFixed(4)} (Scalar: ${regimeScalar.toFixed(2)})`);
+    
     candidates = candidates.filter(c => {
       let required = dynamicMinEdge;
-      
-      // Determine probability for this candidate
       const cProb = c.side === "UP" ? pUp : pDown;
       
-      // If signal is weak (<90%), demand 5% edge
       if (cProb < 0.90) {
         required = Math.max(required, 0.05);
       }
@@ -465,44 +712,71 @@ async function execForAsset(asset, priceData) {
 
       let lateSide = null, sideProb = 0, sideAsk = 0;
 
-      if (pUp >= pReq && z > zMinLateDynamic) { lateSide = "UP"; sideProb = pUp; sideAsk = upAsk || 0.99; }
-      else if (pDown >= pReq && z < -zMinLateDynamic) { lateSide = "DOWN"; sideProb = pDown; sideAsk = downAsk || 0.99; }
+      if (pUp >= pReq && z > zMinLateDynamic) { 
+        lateSide = "UP"; 
+        sideProb = pUp; 
+        sideAsk = upAsk || 0.99; 
+      } else if (pDown >= pReq && z < -zMinLateDynamic) { 
+        lateSide = "DOWN"; 
+        sideProb = pDown; 
+        sideAsk = downAsk || 0.99; 
+      }
 
       if (lateSide) {
-        // 1. EXTREME SIGNAL
+        // 1. EXTREME SIGNAL - Now using Kelly Criterion
         if (absZ >= zHugeDynamic && secsLeft <= LATE_GAME_EXTREME_SECS && sideAsk <= LATE_GAME_MAX_PRICE && (sideProb - sideAsk) >= LATE_GAME_MIN_EV) {
           const limitPrice = Math.min(sideAsk, LATE_GAME_MAX_PRICE);
           const maxShares = MAX_SHARES_PER_MARKET[asset.symbol] || 500;
-          const bigSize = Math.floor(maxShares * LATE_GAME_MAX_FRACTION);
+          
+          // Use Kelly instead of fixed fraction
+          const kellyShares = kellySize(sideProb, limitPrice, maxShares, 0.30); // 30% Kelly
+          const bigSize = Math.max(10, Math.floor(kellyShares / 10) * 10); // Round to 10
 
           const capCheck = canPlaceOrder(state, slug, lateSide, bigSize, asset.symbol);
-          if (capCheck.ok) {
-            logger.log(`EXTREME: Buying ${bigSize} ${lateSide} @ ${limitPrice}`);
-            const resp = await client.createAndPostOrder({
-              tokenID: lateSide === "UP" ? upTokenId : downTokenId,
-              price: limitPrice.toFixed(2), side: Side.BUY, size: bigSize, expiration: String(expiresAt)
-            }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
-            if (resp && resp.orderID) {
-              logOrderAttempt({
-                ts: Date.now(),
-                symbol: asset.symbol,
-                orderID: resp.orderID,
-                side: lateSide,
-                price: limitPrice,
-                size: bigSize,
-                type: "EXTREME" // or "EXTREME" or "LATE_LAYER"
-              });
-            }
+          const corrCheck = checkCorrelationRisk(state, asset.symbol, lateSide, bigSize);
+          
+          if (capCheck.ok && corrCheck.ok) {
+            logger.log(`EXTREME: Buying ${bigSize} ${lateSide} @ ${limitPrice} (Kelly-sized)`);
+            
+            try {
+              const resp = await client.createAndPostOrder({
+                tokenID: lateSide === "UP" ? upTokenId : downTokenId,
+                price: limitPrice.toFixed(2), 
+                side: Side.BUY, 
+                size: bigSize, 
+                expiration: String(expiresAt)
+              }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
+              
+              if (resp && resp.orderID) {
+                logOrderAttempt({
+                  ts: Date.now(),
+                  symbol: asset.symbol,
+                  orderID: resp.orderID,
+                  side: lateSide,
+                  price: limitPrice,
+                  size: bigSize,
+                  type: "EXTREME"
+                });
 
-            addPosition(state, slug, lateSide, bigSize);
-            state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
-            return; 
+                // Monitor order in background
+                pendingOrders.set(resp.orderID, { asset: asset.symbol, side: lateSide, size: bigSize, timestamp: Date.now() });
+                monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, bigSize, logger);
+
+                addPosition(state, slug, lateSide, bigSize);
+                state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
+              }
+            } catch (err) {
+              logger.error(`EXTREME order failed: ${err.message}`);
+            }
+            
+            return;
           } else {
-             logger.log(
-              `Skipping EXTREME; cap hit. (reason=${capCheck.reason}, ` +
-              `total=${capCheck.totalBefore}->${capCheck.totalAfter}, ` +
-              `net=${capCheck.netBefore}->${capCheck.netAfter})`
-            );
+            if (!capCheck.ok) {
+              logger.log(`Skipping EXTREME; cap hit. (reason=${capCheck.reason})`);
+            }
+            if (!corrCheck.ok) {
+              logger.log(`Skipping EXTREME; correlation risk too high: ${corrCheck.portfolioRisk.toFixed(1)} > ${corrCheck.limit}`);
+            }
           }
         }
 
@@ -511,13 +785,10 @@ async function execForAsset(asset, priceData) {
         const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
 
         let edgePenalty = 0;
-        // Fix 1: SOL Churn (High Volume / Low PnL fix)
         if (asset.symbol === "SOL") {
-          edgePenalty += 0.015; 
+          edgePenalty += 0.015;
         }
 
-        // Fix 2: The "Break Even" Bucket (0.85-0.90 fix)
-        // If we aren't 90% sure, we shouldn't be aggressive with layers
         if (sideProb < 0.90) {
           edgePenalty += 0.03;
         }
@@ -540,8 +811,8 @@ async function execForAsset(asset, priceData) {
           const finalMinEv = minEv + edgePenalty;
 
           if (ev < finalMinEv) {
-            logger.log(`Layer ${i}: skip @${target.toFixed(2)} (EV=${ev.toFixed(4)} < ${finalMinEv})`);
-            continue; 
+            logger.log(`Layer ${i}: skip @${target.toFixed(2)} (EV=${ev.toFixed(4)} < ${finalMinEv.toFixed(4)})`);
+            continue;
           }
 
           let layerRiskBand = "medium";
@@ -555,12 +826,15 @@ async function execForAsset(asset, priceData) {
           }
 
           const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
+          const corrCheck = checkCorrelationRisk(state, asset.symbol, lateSide, layerSize);
+          
           if (!capCheck.ok) {
-            logger.log(
-              `Layer ${i} skip; cap hit. (reason=${capCheck.reason}, ` +
-              `total=${capCheck.totalBefore}->${capCheck.totalAfter}, ` +
-              `net=${capCheck.netBefore}->${capCheck.netAfter})`
-            );
+            logger.log(`Layer ${i} skip; cap hit. (reason=${capCheck.reason})`);
+            continue;
+          }
+          
+          if (!corrCheck.ok) {
+            logger.log(`Layer ${i} skip; correlation risk: ${corrCheck.portfolioRisk.toFixed(1)} > ${corrCheck.limit}`);
             continue;
           }
           
@@ -574,10 +848,14 @@ async function execForAsset(asset, priceData) {
           try {
             const resp = await client.createAndPostOrder({
               tokenID: lateSide === "UP" ? upTokenId : downTokenId,
-              price: limitPrice.toFixed(2), side: Side.BUY, size: layerSize, expiration: String(expiresAt)
+              price: limitPrice.toFixed(2), 
+              side: Side.BUY, 
+              size: layerSize, 
+              expiration: String(expiresAt)
             }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
             
             logger.log(`LATE LAYER ${i} RESP:`, resp);
+            
             if (resp && resp.orderID) {
               logOrderAttempt({
                 ts: Date.now(),
@@ -588,14 +866,20 @@ async function execForAsset(asset, priceData) {
                 size: layerSize,
                 type: "LATE_LAYER"
               });
-            }
 
-            addPosition(state, slug, lateSide, layerSize);
-            state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
+              // Monitor in background
+              pendingOrders.set(resp.orderID, { asset: asset.symbol, side: lateSide, size: layerSize, timestamp: Date.now() });
+              monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, layerSize, logger);
+
+              addPosition(state, slug, lateSide, layerSize);
+              state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
+            }
           } catch (err) {
-            logger.log(`Error layer ${i}:`, err?.message || err);
+            logger.error(`Error layer ${i}: ${err.message}`);
           }
         }
+        
+        return; // Exit after late game processing
       }
     }
 
@@ -613,43 +897,63 @@ async function execForAsset(asset, priceData) {
     else if (prob <= PROB_MAX_RISKY && best.ask <= PRICE_MAX_RISKY) riskBand = "risky";
 
     const size = sizeForTrade(best.ev, minsLeft, { riskBand });
-    if (size <= 0) { logger.log(`EV>0 but size=0`); return; }
-
-    const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
-    if (!capCheck.ok) { 
-      logger.log(
-        `Skip normal trade; cap hit. (reason=${capCheck.reason}, ` +
-        `total=${capCheck.totalBefore}->${capCheck.totalAfter}, ` +
-        `net=${capCheck.netBefore}->${capCheck.netAfter})`
-      );
+    if (size <= 0) { 
+      logger.log(`EV>0 but size=0`); 
       return; 
     }
 
-    logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size})`);
-    const resp = await client.createAndPostOrder({
-      tokenID: best.side === "UP" ? upTokenId : downTokenId,
-      price: best.ask.toFixed(2), side: Side.BUY, size, expiration: String(Math.floor(Date.now()/1000)+900)
-    }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
+    const capCheck = canPlaceOrder(state, slug, best.side, size, asset.symbol);
+    const corrCheck = checkCorrelationRisk(state, asset.symbol, best.side, size);
     
-    logger.log(`ORDER RESP:`, resp);
-    if (resp && resp.orderID) {
-      logOrderAttempt({
-        ts: Date.now(),
-        symbol: asset.symbol,
-        orderID: resp.orderID,
-        side: best.side,
-        price: best.ask,
-        size: size,
-        type: "NORMAL" // or "EXTREME" or "LATE_LAYER"
-      });
+    if (!capCheck.ok) { 
+      logger.log(`Skip normal trade; cap hit. (reason=${capCheck.reason})`);
+      return; 
+    }
+    
+    if (!corrCheck.ok) {
+      logger.log(`Skip normal trade; correlation risk: ${corrCheck.portfolioRisk.toFixed(1)} > ${corrCheck.limit}`);
+      return;
     }
 
-    addPosition(state, slug, best.side, size);
-    state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + size;
+    logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size})`);
+    
+    try {
+      const resp = await client.createAndPostOrder({
+        tokenID: best.side === "UP" ? upTokenId : downTokenId,
+        price: best.ask.toFixed(2), 
+        side: Side.BUY, 
+        size, 
+        expiration: String(Math.floor(Date.now()/1000)+900)
+      }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
+      
+      logger.log(`ORDER RESP:`, resp);
+      
+      if (resp && resp.orderID) {
+        logOrderAttempt({
+          ts: Date.now(),
+          symbol: asset.symbol,
+          orderID: resp.orderID,
+          side: best.side,
+          price: best.ask,
+          size: size,
+          type: "NORMAL"
+        });
+
+        // Monitor in background
+        pendingOrders.set(resp.orderID, { asset: asset.symbol, side: best.side, size, timestamp: Date.now() });
+        monitorAndCancelOrder(resp.orderID, asset.symbol, best.side, size, logger);
+
+        addPosition(state, slug, best.side, size);
+        state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + size;
+      }
+    } catch (err) {
+      logger.error(`Normal order failed: ${err.message}`);
+    }
 
   } catch (err) {
-    logger.error("Exec failed:", err.message);
+    logger.error("Exec failed:", err.message, err.stack);
   } finally {
+    executionLock[asset.symbol] = false;
     logger.flush();
   }
 }
@@ -675,30 +979,56 @@ async function getBatchPythPrices(pythIds) {
       });
     }
     return map;
-  } catch (e) { console.error("Pyth Batch Error", e.message); return {}; }
+  } catch (e) { 
+    console.error("Pyth Batch Error", e.message); 
+    return {}; 
+  }
 }
 
 async function execAll() {
   console.log(`\n=== TICK ${new Date().toISOString()} ===`);
-  const pythPrices = await getBatchPythPrices(ASSETS.map(a => a.pythId));
-  await Promise.all(ASSETS.map(asset => {
-    const priceData = pythPrices[asset.pythId];
-    if (!priceData) return Promise.resolve();
-    VolatilityManager.updatePriceHistory(asset.symbol, priceData.price);
-    return execForAsset(asset, priceData);
-  }));
+  
+  try {
+    const pythPrices = await getBatchPythPrices(ASSETS.map(a => a.pythId));
+    
+    await Promise.all(ASSETS.map(asset => {
+      const priceData = pythPrices[asset.pythId];
+      if (!priceData) {
+        console.log(`[${asset.symbol}] No price data`);
+        return Promise.resolve();
+      }
+      VolatilityManager.updatePriceHistory(asset.symbol, priceData.price);
+      return execForAsset(asset, priceData);
+    }));
+  } catch (err) {
+    console.error("execAll error:", err.message, err.stack);
+  }
+  
   console.log("=== TICK END ===");
 }
 
 // === STARTUP & SCHEDULER ===
 (async () => {
-  console.log("Initializing Bot...");
+  console.log("Initializing Bot v2.0...");
 
-  // 1. Warm up volatility with historical data
-  const symbols = ASSETS.map(a => a.symbol);
-  await VolatilityManager.backfillHistory(symbols);
+  try {
+    // 1. Warm up volatility with historical data
+    const symbols = ASSETS.map(a => a.symbol);
+    await VolatilityManager.backfillHistory(symbols);
 
-  // 2. Start the loop ONLY after backfill is done
-  console.log("Starting Cron...");
-  cron.schedule(`*/${interval} * * * * *`, () => execAll().catch(console.error));
+    console.log("✅ Backfill complete");
+
+    // 2. Start the loop
+    console.log(`Starting Cron (every ${interval}s)...`);
+    cron.schedule(`*/${interval} * * * * *`, () => {
+      execAll().catch(err => {
+        console.error("Cron execution error:", err.message, err.stack);
+      });
+    });
+    
+    console.log("🚀 Bot running!");
+  } catch (err) {
+    console.error("FATAL: Startup failed:", err.message, err.stack);
+    process.exit(1);
+  }
 })();
