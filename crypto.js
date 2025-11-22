@@ -187,6 +187,15 @@ function logTickSnapshot(snapshot) {
   } catch (err) { console.error("[TICK-LOG] Failed:", err); }
 }
 
+function logOrderAttempt(orderData) {
+  try {
+    const filename = `orders-${new Date().toISOString().slice(0,10)}.jsonl`;
+    fs.appendFile(filename, JSON.stringify(orderData) + "\n", (err) => { 
+      if (err) console.error("[ORDER-LOG] Failed:", err); 
+    });
+  } catch (e) { console.error("[ORDER-LOG] Error:", e); }
+}
+
 // Smart Sizing
 function sizeForTrade(ev, minsLeft, opts = {}) {
   const { minEdgeOverride = null, riskBand = "medium" } = opts;
@@ -454,10 +463,22 @@ async function execForAsset(asset, priceData) {
           const capCheck = canPlaceOrder(state, slug, lateSide, bigSize, asset.symbol);
           if (capCheck.ok) {
             logger.log(`EXTREME: Buying ${bigSize} ${lateSide} @ ${limitPrice}`);
-            await client.createAndPostOrder({
+            const resp = await client.createAndPostOrder({
               tokenID: lateSide === "UP" ? upTokenId : downTokenId,
               price: limitPrice.toFixed(2), side: Side.BUY, size: bigSize, expiration: String(expiresAt)
             }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
+            if (resp && resp.orderID) {
+              logOrderAttempt({
+                ts: Date.now(),
+                symbol: asset.symbol,
+                orderID: resp.orderID,
+                side: lateSide,
+                price: limitPrice,
+                size: bigSize,
+                type: "EXTREME" // or "EXTREME" or "LATE_LAYER"
+              });
+            }
+
             addPosition(state, slug, lateSide, bigSize);
             state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
             return; 
@@ -504,8 +525,8 @@ async function execForAsset(asset, priceData) {
           const finalMinEv = minEv + edgePenalty;
 
           if (ev < finalMinEv) {
-             logger.log(`Layer ${i}: skip @${target.toFixed(2)} (EV=${ev.toFixed(4)} < ${finalMinEv})`);
-             continue; 
+            logger.log(`Layer ${i}: skip @${target.toFixed(2)} (EV=${ev.toFixed(4)} < ${finalMinEv})`);
+            continue; 
           }
 
           let layerRiskBand = "medium";
@@ -542,6 +563,18 @@ async function execForAsset(asset, priceData) {
             }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
             
             logger.log(`LATE LAYER ${i} RESP:`, resp);
+            if (resp && resp.orderID) {
+              logOrderAttempt({
+                ts: Date.now(),
+                symbol: asset.symbol,
+                orderID: resp.orderID,
+                side: lateSide,
+                price: limitPrice,
+                size: layerSize,
+                type: "LATE_LAYER"
+              });
+            }
+
             addPosition(state, slug, lateSide, layerSize);
             state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
           } catch (err) {
@@ -584,6 +617,18 @@ async function execForAsset(asset, priceData) {
     }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
     
     logger.log(`ORDER RESP:`, resp);
+    if (resp && resp.orderID) {
+      logOrderAttempt({
+        ts: Date.now(),
+        symbol: asset.symbol,
+        orderID: resp.orderID,
+        side: best.side,
+        price: best.ask,
+        size: size,
+        type: "NORMAL" // or "EXTREME" or "LATE_LAYER"
+      });
+    }
+
     addPosition(state, slug, best.side, size);
     state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + size;
 
