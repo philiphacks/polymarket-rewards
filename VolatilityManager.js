@@ -15,7 +15,7 @@ const MIN_DATA_POINTS = 10;
 // };
 
 const MIN_VOL_BPS = {
-  BTC: 3.0,  // Lowered to capture more BTC volume (your best asset)
+  BTC: 3.5,  // Lowered to capture more BTC volume (your best asset)
   ETH: 4.0,  // Keep steady
   SOL: 8.0,  // Raised to reduce noise/churn (your worst asset)
   XRP: 6.0,  // Keep steady
