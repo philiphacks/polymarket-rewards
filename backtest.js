@@ -10,10 +10,11 @@ const CONFIG = {
   FEE_BPS: 10,
   
   // NEW: Advanced features
-  USE_DRIFT: false,           // Toggle drift adjustment
+  USE_DRIFT: true,           // Toggle drift adjustment
   REGIME_INVERSION: false,    // Toggle inverted regime logic
   KELLY_SIZING: true,        // Use Kelly vs fixed size
-  KELLY_FRACTION: 0.10,       // Kelly fraction (0.25 = quarter Kelly, 0.15 = more conservative)
+  KELLY_FRACTION: 0.15,       // Kelly fraction (0.25 = quarter Kelly, 0.15 = more conservative)
+  USE_CORRELATION_CHECK: true, // Toggle correlation risk check
   
   // Risk controls
   USE_MAX_DRAWDOWN: false,    // Toggle drawdown stop
@@ -29,7 +30,7 @@ const CONFIG = {
 
 // ===================================================
 
-const LOG_FILE = "ticks-20251121.jsonl";
+const LOG_FILE = "ticks-20251122.jsonl";
 const allTrades = [];
 
 // Student's t-CDF (df=5)
@@ -130,6 +131,10 @@ async function runBacktest() {
   let wins = 0;
   let losses = 0;
   let stopTrading = false;
+  
+  // Correlation tracking
+  let correlationBlockCount = 0;
+  let correlationBlockDetails = [];
   
   // Store all market results with timestamps for proper drawdown calculation
   const marketResults = [];
@@ -316,6 +321,42 @@ async function runBacktest() {
   // --- ANALYSIS ---
   runDeepAnalysis(allTrades, markets);
   runAdvancedMetrics(allTrades, totalPnL, totalVolume);
+  
+  // --- CORRELATION ANALYSIS ---
+  console.log("\n--- [F] CORRELATION RISK ANALYSIS ---");
+  console.log(`Correlation Check: ${CONFIG.USE_CORRELATION_CHECK ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Total Blocks: ${correlationBlockCount}`);
+  
+  if (correlationBlockCount > 0) {
+    console.log(`\n⚠️  Correlation blocked ${correlationBlockCount} trades:`);
+    
+    // Group by asset
+    const blocksByAsset = {};
+    correlationBlockDetails.forEach(b => {
+      if (!blocksByAsset[b.symbol]) blocksByAsset[b.symbol] = [];
+      blocksByAsset[b.symbol].push(b);
+    });
+    
+    Object.keys(blocksByAsset).sort().forEach(sym => {
+      const blocks = blocksByAsset[sym];
+      const totalSize = blocks.reduce((sum, b) => sum + b.size, 0);
+      console.log(`  ${sym}: ${blocks.length} blocks, ${totalSize} shares blocked`);
+    });
+    
+    // Show top 5 blocks
+    console.log(`\nTop 5 Largest Blocks:`);
+    correlationBlockDetails
+      .sort((a, b) => b.risk - a.risk)
+      .slice(0, 5)
+      .forEach((b, i) => {
+        console.log(
+          `  ${i+1}. ${b.symbol} ${b.side} size=${b.size} ` +
+          `(risk=${b.risk.toFixed(1)} > ${b.limit.toFixed(1)}) ${b.type || 'NORMAL'}`
+        );
+      });
+  } else {
+    console.log(`✅ No trades blocked by correlation risk`);
+  }
 
   console.log("\n================ RESULTS ================");
   console.log(`Config: Z=${CONFIG.Z_MIN_EARLY}/${CONFIG.Z_MIN_LATE}, EDGE=${CONFIG.MIN_EDGE}, FEE=${CONFIG.FEE_BPS}bps`);
