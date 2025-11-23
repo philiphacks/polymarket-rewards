@@ -794,7 +794,7 @@ async function execForAsset(asset, priceData) {
 
                 // Monitor order in background
                 pendingOrders.set(resp.orderID, { asset: asset.symbol, side: lateSide, size: bigSize, timestamp: Date.now() });
-                monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, bigSize, logger);
+                // monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, bigSize, logger);
 
                 addPosition(state, slug, lateSide, bigSize);
                 state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
@@ -903,7 +903,7 @@ async function execForAsset(asset, priceData) {
 
               // Monitor in background
               pendingOrders.set(resp.orderID, { asset: asset.symbol, side: lateSide, size: layerSize, timestamp: Date.now() });
-              monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, layerSize, logger);
+              // monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, layerSize, logger);
 
               addPosition(state, slug, lateSide, layerSize);
               state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
