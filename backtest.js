@@ -31,6 +31,12 @@ const CONFIG = {
 // ===================================================
 
 const LOG_FILE = "ticks-20251122.jsonl";
+const LOG_FILES = [
+  "ticks-20251120.jsonl",
+  "ticks-20251121.jsonl",
+  "ticks-20251122.jsonl",
+  "ticks-20251123.jsonl"
+];
 const allTrades = [];
 
 // Student's t-CDF (df=5)
@@ -98,33 +104,50 @@ function kellySize(prob, price, maxShares, fraction = 0.25) {
   return Math.min(Math.max(10, Math.floor(size / 10) * 10), maxShares);
 }
 
-async function runBacktest() {
-  const fileStream = fs.createReadStream(LOG_FILE);
-  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
-
+async function loadMarketsFromFiles(files) {
   const markets = {};
 
-  console.log("⏳ Parsing logs...");
-  
-  for await (const line of rl) {
-    try {
-      const tick = JSON.parse(line);
-      if (!markets[tick.slug]) {
-        markets[tick.slug] = {
-          symbol: tick.symbol,
-          ticks: [],
-          finalPrice: 0,
-          startPrice: tick.startPrice,
-          positions: { UP: 0, DOWN: 0, CASH: 0 },
-          trades: []
-        };
+  for (const file of files) {
+    console.log(`⏳ Parsing logs from ${file}...`);
+
+    const fileStream = fs.createReadStream(file);
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
+    for await (const line of rl) {
+      try {
+        const tick = JSON.parse(line);
+
+        if (!markets[tick.slug]) {
+          markets[tick.slug] = {
+            symbol: tick.symbol,
+            ticks: [],
+            finalPrice: 0,
+            startPrice: tick.startPrice,
+            positions: { UP: 0, DOWN: 0, CASH: 0 },
+            trades: []
+          };
+        }
+
+        const m = markets[tick.slug];
+        m.ticks.push(tick);
+        m.finalPrice = tick.currentPrice; // last tick wins
+        // keep first startPrice, in case it differs between files
+        if (m.startPrice == null) m.startPrice = tick.startPrice;
+
+      } catch (e) {
+        // ignore corrupt lines
       }
-      markets[tick.slug].ticks.push(tick);
-      markets[tick.slug].finalPrice = tick.currentPrice;
-    } catch (e) { /* ignore corrupt lines */ }
+    }
   }
 
-  console.log(`✅ Loaded ${Object.keys(markets).length} markets. Running simulation...\n`);
+  return markets;
+}
+
+async function runBacktest() {
+  const markets = await loadMarketsFromFiles(LOG_FILES);
+  console.log(
+    `✅ Loaded ${Object.keys(markets).length} markets from ${LOG_FILES.length} files. Running simulation...\n`
+  );
 
   let totalPnL = 0;
   let totalVolume = 0;
