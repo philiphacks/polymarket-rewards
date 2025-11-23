@@ -11,7 +11,6 @@ const CONFIG = {
   
   // NEW: Advanced features
   USE_DRIFT: true,           // Toggle drift adjustment
-  USE_STUDENT_T: false,       // Toggle t-distribution vs normal
   REGIME_INVERSION: false,    // Toggle inverted regime logic
   KELLY_SIZING: false,        // Use Kelly vs fixed size
   

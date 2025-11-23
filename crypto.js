@@ -1,6 +1,5 @@
 // Version 2.0 - Refactored with Quant Improvements
 // Key Changes:
-// - Student's t-distribution for fat tails
 // - Drift estimation for directional bias
 // - Fixed time decay (increases near expiry)
 // - Inverted regime logic (lower z in high vol)
@@ -8,6 +7,7 @@
 // - Order fill tracking with auto-cancel
 // - Correlation-aware position limits
 // - Better error handling
+// - Removed Student's t (normal distribution is already well-calibrated)
 
 import 'dotenv/config';
 import cron from "node-cron";
@@ -556,7 +556,7 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    // 4) Volatility & Drift (NEW)
+    // 4) Volatility & Drift
     let rawSigmaPerMin = VolatilityManager.getRealizedVolatility(asset.symbol, currentPrice);
     const drift = estimateDrift(asset.symbol, 60);
     
@@ -571,9 +571,8 @@ async function execForAsset(asset, priceData) {
     // Include drift in z-score calculation
     const z = (currentPrice - startPrice - drift * minsLeft) / sigmaT;
     
-    // Use Student's t-distribution for fat tails
-    const tScore = z / Math.sqrt(1 + z * z / 5); // Convert to t-score with df=5
-    const pUp = studentTCdf(tScore, 5);
+    // Use normal distribution (well-calibrated for our use case)
+    const pUp = normCdf(z);
     const pDown = 1 - pUp;
 
     logger.log(
