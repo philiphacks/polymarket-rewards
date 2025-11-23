@@ -14,6 +14,7 @@ const CONFIG = {
   REGIME_INVERSION: false,    // Toggle inverted regime logic
   KELLY_SIZING: true,        // Use Kelly vs fixed size
   KELLY_FRACTION: 0.15,       // Kelly fraction (0.25 = quarter Kelly, 0.15 = more conservative)
+  STANDARD_KELLY_SIZE: 100,   // Always try to buy 100 shares
   USE_CORRELATION_CHECK: true, // Toggle correlation risk check
   
   // Risk controls
@@ -27,7 +28,7 @@ const CONFIG = {
     XRP: 0.04
   },
 
-  USE_FILL_PROB: true,
+  USE_FILL_PROB: false,
   FILL_PROB_LAYERS: [
     { maxProb: 0.60, fillFraction: 1.00 }, // very likely to get filled
     { maxProb: 0.70, fillFraction: 0.90 },
@@ -106,12 +107,34 @@ function estimateDrift(priceHistory) {
 }
 
 // Kelly sizing
-function kellySize(prob, price, maxShares, fraction = 0.25) {
-  if (price >= 1 || price <= 0) return 10; // fallback
-  const odds = 1 / price - 1;
-  const kelly = (prob * odds - (1 - prob)) / odds;
-  const size = Math.max(0, kelly * fraction * maxShares);
-  return Math.min(Math.max(10, Math.floor(size / 10) * 10), maxShares);
+// function kellySize(prob, price, maxShares, fraction = 0.25) {
+//   if (price >= 1 || price <= 0) return 0; // fallback
+//   const odds = 1 / price - 1;
+//   const kelly = (prob * odds - (1 - prob)) / odds;
+//   const size = Math.max(0, kelly * fraction * maxShares);
+//   return Math.min(Math.max(CONFIG.STANDARD_KELLY_SIZE, Math.floor(size / 10) * 10), maxShares);
+// }
+
+function kellySize(prob, price, maxShares, fraction = 0.15) {
+  // Edge cases
+  if (price >= 0.99 || price <= 0.01) return 10; // fallback for extreme prices
+  if (prob <= price) return 10; // no edge, minimum bet
+  
+  // Kelly formula for binary outcomes: (p - price) / (1 - price)
+  // Where you pay 'price' and get $1 if you win
+  const kellyFraction = (prob - price) / (1 - price);
+  
+  // Apply fractional Kelly for risk management
+  const fractionalKelly = kellyFraction * fraction;
+  
+  // Convert to share size (as a fraction of max position)
+  const rawSize = fractionalKelly * maxShares;
+  
+  // Round to nearest 10 shares, minimum 10
+  const roundedSize = Math.max(10, Math.floor(rawSize / 10) * 10);
+  
+  // Cap at maxShares
+  return Math.min(roundedSize, maxShares);
 }
 
 function getFillFraction(modelProb) {
@@ -249,7 +272,7 @@ async function runBacktest() {
       const modelProbForTrade = z > 0 ? pUp : pDown;
       const priceForTrade = z > 0 ? upAsk : downAsk;
 
-      let intendedSize = 10;
+      let intendedSize = CONFIG.STANDARD_KELLY_SIZE;
       if (CONFIG.KELLY_SIZING && upAsk && downAsk && priceForTrade) {
         intendedSize = kellySize(
           modelProbForTrade,
