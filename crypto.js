@@ -57,6 +57,13 @@ const BASIS_BUFFER_BPS = {
 
 const MAX_SHARES_PER_MARKET = { BTC: 600, ETH: 300, SOL: 300, XRP: 200 };
 
+const ASSET_SPECIFIC_KELLY_FRACTION = {
+  BTC: 0.15,
+  ETH: 0.08,
+  SOL: 0.15,
+  XRP: 0.15
+};
+
 // Correlation matrix (for position limits)
 const CORRELATION_MATRIX = {
   'BTC-ETH': 0.70,
@@ -93,7 +100,6 @@ const Z_HUGE = 4.0;
 const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.98;
-const KELLY_FRACTION = 0.15; // Optimal from backtesting (0.15 = best RoV)
 
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
@@ -776,7 +782,7 @@ async function execForAsset(asset, priceData) {
           const maxShares = MAX_SHARES_PER_MARKET[asset.symbol] || 500;
           
           // Use Kelly instead of fixed fraction
-          const kellyShares = kellySize(sideProb, limitPrice, maxShares, KELLY_FRACTION);
+          const kellyShares = kellySize(sideProb, limitPrice, maxShares, ASSET_SPECIFIC_KELLY_FRACTION[asset.symbol] || 0.15);
           const bigSize = Math.max(10, Math.floor(kellyShares / 10) * 10); // Round to 10
 
           const capCheck = canPlaceOrder(state, slug, lateSide, bigSize, asset.symbol);
