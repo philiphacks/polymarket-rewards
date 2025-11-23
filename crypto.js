@@ -87,6 +87,7 @@ const Z_HUGE = 4.0;
 const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.98;
+const KELLY_FRACTION = 0.15; // Optimal from backtesting (0.15 = best RoV)
 
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
@@ -163,7 +164,7 @@ function estimateDrift(symbol, windowMinutes = 60) {
   const history = VolatilityManager.getPriceHistory(symbol, windowMinutes);
   if (!history || history.length < 10) return 0;
   
-  // Linear regression: price = a + b*time
+  // Linear regression: ln(price) = a + b*time
   const n = history.length;
   let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
   
@@ -176,9 +177,13 @@ function estimateDrift(symbol, windowMinutes = 60) {
     sumX2 += x * x;
   }
   
-  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  // Check for division by zero
+  const denominator = n * sumX2 - sumX * sumX;
+  if (Math.abs(denominator) < 1e-10) return 0;
   
-  // Convert to drift per minute (annualized then scaled)
+  const slope = (n * sumXY - sumX * sumY) / denominator;
+  
+  // Convert to drift per minute in dollars
   const driftPerMinute = slope * history[0].price;
   
   driftCache[symbol] = { drift: driftPerMinute, lastUpdate: now };
@@ -186,13 +191,13 @@ function estimateDrift(symbol, windowMinutes = 60) {
 }
 
 // Kelly Criterion for position sizing
-function kellySize(prob, price, maxShares, fraction = 0.25) {
+function kellySize(prob, price, maxShares, fraction = 0.15) {
   if (price >= 1 || price <= 0) return 0;
   
   const odds = 1 / price - 1;
   const kelly = (prob * odds - (1 - prob)) / odds;
   
-  // Use fractional Kelly (quarter Kelly for safety)
+  // Use fractional Kelly (0.15 = 15% Kelly - optimal balance from backtesting)
   const size = Math.max(0, kelly * fraction * maxShares);
   return Math.min(size, maxShares);
 }
@@ -407,6 +412,7 @@ async function monitorAndCancelOrder(orderID, asset, side, size, logger) {
         
         if (!order) {
           logger.warn(`Order ${orderID} not found`);
+          pendingOrders.delete(orderID);
           break;
         }
         
@@ -426,7 +432,10 @@ async function monitorAndCancelOrder(orderID, asset, side, size, logger) {
         }
         
       } catch (err) {
-        logger.error(`Error checking order ${orderID}: ${err.message}`);
+        // Don't spam logs on temporary errors
+        if (Date.now() - startTime > ORDER_MONITOR_MS - 10000) {
+          logger.error(`Error checking order ${orderID}: ${err.message}`);
+        }
       }
     }
     
@@ -634,7 +643,7 @@ async function execForAsset(asset, priceData) {
     let zHugeDynamic     = Z_HUGE / Math.max(0.5, regimeScalar);
 
     // Additional low-vol adjustment (if scalar < 1.0, we're in calm market)
-    if (regimeScalar < 1.0) {
+    if (regimeScalar < 1.1) {
       const LOW_VOL_BOOST = 0.85; // Further reduce barriers by 15%
       zMinEarlyDynamic *= LOW_VOL_BOOST;
       zMinLateDynamic  *= LOW_VOL_BOOST;
@@ -728,7 +737,7 @@ async function execForAsset(asset, priceData) {
           const maxShares = MAX_SHARES_PER_MARKET[asset.symbol] || 500;
           
           // Use Kelly instead of fixed fraction
-          const kellyShares = kellySize(sideProb, limitPrice, maxShares, 0.30); // 30% Kelly
+          const kellyShares = kellySize(sideProb, limitPrice, maxShares, KELLY_FRACTION);
           const bigSize = Math.max(10, Math.floor(kellyShares / 10) * 10); // Round to 10
 
           const capCheck = canPlaceOrder(state, slug, lateSide, bigSize, asset.symbol);

@@ -10,9 +10,10 @@ const CONFIG = {
   FEE_BPS: 10,
   
   // NEW: Advanced features
-  USE_DRIFT: true,           // Toggle drift adjustment
+  USE_DRIFT: false,           // Toggle drift adjustment
   REGIME_INVERSION: false,    // Toggle inverted regime logic
-  KELLY_SIZING: false,        // Use Kelly vs fixed size
+  KELLY_SIZING: true,        // Use Kelly vs fixed size
+  KELLY_FRACTION: 0.10,       // Kelly fraction (0.25 = quarter Kelly, 0.15 = more conservative)
   
   // Risk controls
   USE_MAX_DRAWDOWN: false,    // Toggle drawdown stop
@@ -188,7 +189,8 @@ async function runBacktest() {
         tradeSize = kellySize(
           z > 0 ? pUp : pDown, 
           z > 0 ? upAsk : downAsk, 
-          CONFIG.MAX_SHARES
+          CONFIG.MAX_SHARES,
+          CONFIG.KELLY_FRACTION  // Use config value
         );
       }
 
