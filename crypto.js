@@ -976,7 +976,7 @@ async function execForAsset(asset, priceData) {
 
         // Monitor in background
         pendingOrders.set(resp.orderID, { asset: asset.symbol, side: best.side, size, timestamp: Date.now() });
-        monitorAndCancelOrder(resp.orderID, asset.symbol, best.side, size, logger);
+        // monitorAndCancelOrder(resp.orderID, asset.symbol, best.side, size, logger);
 
         addPosition(state, slug, best.side, size);
         state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + size;
