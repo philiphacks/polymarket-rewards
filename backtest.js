@@ -25,7 +25,17 @@ const CONFIG = {
     ETH: 0.03,
     SOL: 0.05,  // Require more edge for SOL
     XRP: 0.04
-  }
+  },
+
+  USE_FILL_PROB: true,
+  FILL_PROB_LAYERS: [
+    { maxProb: 0.60, fillFraction: 1.00 }, // very likely to get filled
+    { maxProb: 0.70, fillFraction: 0.90 },
+    { maxProb: 0.80, fillFraction: 0.80 },
+    { maxProb: 0.90, fillFraction: 0.60 },
+    { maxProb: 0.95, fillFraction: 0.45 },
+    { maxProb: 1.01, fillFraction: 0.30 } // > 0.95 → ~30% fills
+  ]
 };
 
 // ===================================================
@@ -102,6 +112,17 @@ function kellySize(prob, price, maxShares, fraction = 0.25) {
   const kelly = (prob * odds - (1 - prob)) / odds;
   const size = Math.max(0, kelly * fraction * maxShares);
   return Math.min(Math.max(10, Math.floor(size / 10) * 10), maxShares);
+}
+
+function getFillFraction(modelProb) {
+  if (!CONFIG.USE_FILL_PROB) return 1.0;
+  const layers = CONFIG.FILL_PROB_LAYERS || [];
+  for (const layer of layers) {
+    if (modelProb <= layer.maxProb) {
+      return layer.fillFraction;
+    }
+  }
+  return 1.0; // fallback
 }
 
 async function loadMarketsFromFiles(files) {
@@ -212,21 +233,27 @@ async function runBacktest() {
       }
 
       // Trade size
-      let tradeSize = 10;
-      if (CONFIG.KELLY_SIZING && upAsk && downAsk) {
-        tradeSize = kellySize(
-          z > 0 ? pUp : pDown, 
-          z > 0 ? upAsk : downAsk, 
+      const modelProbForTrade = z > 0 ? pUp : pDown;
+      const priceForTrade = z > 0 ? upAsk : downAsk;
+
+      let intendedSize = 10;
+      if (CONFIG.KELLY_SIZING && upAsk && downAsk && priceForTrade) {
+        intendedSize = kellySize(
+          modelProbForTrade,
+          priceForTrade,
           CONFIG.MAX_SHARES,
-          CONFIG.KELLY_FRACTION  // Use config value
+          CONFIG.KELLY_FRACTION
         );
       }
+      const fillFraction = getFillFraction(modelProbForTrade);
+      let filledSize = Math.floor(intendedSize * fillFraction / 10) * 10; // keep 10-share granularity
+      if (filledSize < 10) filledSize = 0; // nothing meaningful filled
 
       // --- UP LOGIC ---
       if (upAsk && z >= zReq) {
         const ev = pUp - upAsk;
-        if (ev > minEdge) {
-          const vol = executeTrade(m, "UP", upAsk, tradeSize, tick.ts);
+        if (ev > minEdge && filledSize > 0) {
+          const vol = executeTrade(m, "UP", upAsk, filledSize, tick.ts);
           totalVolume += vol;
 
           allTrades.push({
@@ -235,7 +262,9 @@ async function runBacktest() {
             entryPrice: upAsk,
             modelProb: pUp,
             minsLeft: minsLeft,
-            size: tradeSize,
+            size: filledSize,
+            intendedSize: intendedSize,
+            fillFraction: fillFraction,
             marketSlug: slug,
             timestamp: tick.ts,
             z: z,
@@ -247,8 +276,8 @@ async function runBacktest() {
       // --- DOWN LOGIC ---
       if (downAsk && z <= -zReq) {
         const ev = pDown - downAsk;
-        if (ev > minEdge) {
-          const vol = executeTrade(m, "DOWN", downAsk, tradeSize, tick.ts);
+        if (ev > minEdge && filledSize > 0) {
+          const vol = executeTrade(m, "DOWN", downAsk, filledSize, tick.ts);
           totalVolume += vol;
 
           allTrades.push({
@@ -257,7 +286,9 @@ async function runBacktest() {
             entryPrice: downAsk,
             modelProb: pDown,
             minsLeft: minsLeft,
-            size: tradeSize,
+            size: filledSize,            // actual filled size
+            intendedSize: intendedSize,  // NEW
+            fillFraction: fillFraction,  // NEW
             marketSlug: slug,
             timestamp: tick.ts,
             z: z,

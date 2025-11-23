@@ -9,7 +9,7 @@ const MIN_DATA_POINTS = 10;
 // If realized vol drops below this, we assume this floor to prevent noise trading.
 const MIN_VOL_BPS = {
   BTC: 3.0,  // Lowered to capture more BTC volume (your best asset)
-  ETH: 4.0,  // Keep steady
+  ETH: 5.0,  // Keep steady
   SOL: 8.0,  // Raised to reduce noise/churn (your worst asset)
   XRP: 6.0,  // Keep steady
 };
