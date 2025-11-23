@@ -183,5 +183,5 @@ export const VolatilityManager = {
   getRealizedVolatility,
   getVolRegimeRatio,
   backfillHistory,
-  getPriceHistory  // NEW: Added for drift estimation
+  getPriceHistory
 };
