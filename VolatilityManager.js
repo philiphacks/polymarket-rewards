@@ -7,16 +7,9 @@ const MIN_DATA_POINTS = 10;
 // 1 Basis Point (bps) = 0.01% = 0.0001
 // These are the "Minimum Volatility" floors in Basis Points per Minute.
 // If realized vol drops below this, we assume this floor to prevent noise trading.
-// const MIN_VOL_BPS = {
-//   BTC: 3.5,  // ~0.035% per minute (At $95k, this is ~$33)
-//   ETH: 4.0,  // ~0.04% per minute
-//   SOL: 6.0,  // ~0.06% per minute (Higher beta than BTC)
-//   XRP: 6.0,  // ~0.06% per minute
-// };
-
 const MIN_VOL_BPS = {
   BTC: 3.5,  // Lowered to capture more BTC volume (your best asset)
-  ETH: 4.0,  // Keep steady
+  ETH: 5.0,  // Keep steady
   SOL: 8.0,  // Raised to reduce noise/churn (your worst asset)
   XRP: 6.0,  // Keep steady
 };
@@ -64,6 +57,33 @@ function updatePriceHistory(symbol, price) {
     history[symbol] = history[symbol].slice(-WINDOW_SIZE);
   }
   saveHistory();
+}
+
+/**
+ * NEW: Get price history for drift estimation
+ * Returns array of price points within the specified window
+ * @param {string} symbol - Asset symbol (BTC, ETH, etc.)
+ * @param {number} windowMinutes - How many minutes of history to return
+ * @returns {Array<{price: number, timestamp: number}>} Price history
+ */
+function getPriceHistory(symbol, windowMinutes = 60) {
+  const data = history[symbol];
+  
+  if (!data || data.length === 0) {
+    return [];
+  }
+
+  const now = Date.now();
+  const cutoffTime = now - (windowMinutes * 60 * 1000);
+  
+  // Filter to only include data within the window
+  const filtered = data.filter(entry => entry.ts >= cutoffTime);
+  
+  // Return in format expected by drift calculation
+  return filtered.map(entry => ({
+    price: entry.price,
+    timestamp: entry.ts
+  }));
 }
 
 /**
@@ -162,5 +182,6 @@ export const VolatilityManager = {
   updatePriceHistory,
   getRealizedVolatility,
   getVolRegimeRatio,
-  backfillHistory
+  backfillHistory,
+  getPriceHistory
 };
