@@ -82,7 +82,7 @@ const MIN_EDGE_LATE  = 0.03;
 // EARLY TRADING CONFIG (5-15 mins left)
 const ENABLE_EARLY_TRADING = false; // Toggle this to enable/disable early trading
 const Z_MIN_VERY_EARLY = 1.5; // Stricter z-threshold for 5+ min window
-const Z_MIN_MID_EARLY = 1.2;  // Medium threshold for 3-5 min window
+const Z_MIN_MID_EARLY = 1.2;  // Medium threshold for 3-5 min window, replaces Z_HUGE if early trading
 // Note: Z_MIN_LATE = 0.7 for <3 mins (defined below)
 
 // Base z-thresholds (Now INVERTED - will be divided by regime scalar)
@@ -96,7 +96,7 @@ const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
 
 // Extreme late-game constants
-const Z_HUGE = 2.0;
+const Z_HUGE = 2.8;
 const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.98;
