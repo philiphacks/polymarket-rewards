@@ -1,13 +1,10 @@
-// Version 2.0 - Refactored with Quant Improvements
-// Key Changes:
-// - Drift estimation for directional bias
-// - Fixed time decay (increases near expiry)
-// - Inverted regime logic (lower z in high vol)
-// - Kelly criterion sizing for extreme trades
-// - Order fill tracking with auto-cancel
-// - Correlation-aware position limits
-// - Better error handling
-// - Removed Student's t (normal distribution is already well-calibrated)
+// Version 2.1 - Fixed Z-Score Thresholds & Early Trading Sizing
+// Key Changes from 2.0:
+// - Fixed regime scalar bounds to prevent extreme adjustments
+// - Increased Z_HUGE from 2.0 to 2.8 for true extreme signals
+// - Added EARLY_TRADE_SIZE_MULTIPLIER for reduced sizing >5 mins
+// - Improved z-threshold progression
+// - Better regime-adjusted threshold clamping
 
 import 'dotenv/config';
 import cron from "node-cron";
@@ -81,13 +78,17 @@ const MIN_EDGE_LATE  = 0.03;
 
 // EARLY TRADING CONFIG (5-15 mins left)
 const ENABLE_EARLY_TRADING = false; // Toggle this to enable/disable early trading
-const Z_MIN_VERY_EARLY = 1.5; // Stricter z-threshold for 5+ min window
-const Z_MIN_MID_EARLY = 1.2;  // Medium threshold for 3-5 min window, replaces Z_HUGE if early trading
+const Z_MIN_VERY_EARLY = 1.8; // Stricter z-threshold for 5+ min window (was 1.5)
+const Z_MIN_MID_EARLY = 1.4;  // Medium threshold for 3-5 min window (was 1.2)
 // Note: Z_MIN_LATE = 0.7 for <3 mins (defined below)
 
 // Base z-thresholds (Now INVERTED - will be divided by regime scalar)
 const Z_MIN_EARLY = 1.0;
 const Z_MIN_LATE  = 0.7;
+
+// Regime scalar bounds (prevent extreme adjustments)
+const REGIME_SCALAR_MIN = 0.7; // Don't make thresholds too high in low vol
+const REGIME_SCALAR_MAX = 1.4; // Don't make thresholds too low in high vol
 
 // Limits for dynamicZMax (time-based momentum filter)
 const Z_MAX_FAR_MINUTES = 6;
@@ -96,10 +97,13 @@ const Z_MAX_FAR = 2.5;
 const Z_MAX_NEAR = 1.7;
 
 // Extreme late-game constants
-const Z_HUGE = 2.8;
+const Z_HUGE = 2.8; // Increased from 2.0 - now requires ~99.7% probability
 const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.98;
+
+// Early trading size reduction (>5 mins left)
+const EARLY_TRADE_SIZE_MULTIPLIER = 0.4; // 40% of normal size for very early trades
 
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
@@ -123,37 +127,7 @@ const client = new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, SIGNATURE_TYPE
 
 // ---------- STATISTICAL FUNCTIONS ----------
 
-// Student's t-distribution CDF (df = 5 for fat tails)
-function studentTCdf(t, df = 5) {
-  if (df <= 0) throw new Error("df must be positive");
-  
-  const x = df / (t * t + df);
-  const a = df / 2;
-  const b = 0.5;
-  
-  // Incomplete beta approximation
-  let beta;
-  if (x < 0 || x > 1) return t > 0 ? 1 : 0;
-  
-  // Simple approximation for beta function
-  const terms = 20;
-  let sum = 0;
-  for (let i = 0; i < terms; i++) {
-    const coef = Math.exp(
-      a * Math.log(x) + 
-      b * Math.log(1 - x) + 
-      i * Math.log(1 - x) - 
-      Math.log(b + i)
-    );
-    sum += coef;
-  }
-  beta = sum;
-  
-  const result = 0.5 + 0.5 * (t > 0 ? 1 : -1) * (1 - beta);
-  return Math.max(0, Math.min(1, result));
-}
-
-// Normal CDF (fallback)
+// Normal CDF
 function normCdf(z) {
   const t = 1 / (1 + 0.2316419 * Math.abs(z));
   const d = 0.3989423 * Math.exp(-0.5 * z * z);
@@ -407,6 +381,12 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
 
   let size = BASE_MIN + evNorm * (BASE_MAX - BASE_MIN);
   size = Math.round((size * timeFactor) / 10) * 10;
+  
+  // Apply early trading size reduction if >5 mins left
+  if (minsLeft > 5) {
+    size = Math.round((size * EARLY_TRADE_SIZE_MULTIPLIER) / 10) * 10;
+  }
+  
   return Math.min(size, ABS_MAX);
 }
 
@@ -584,8 +564,9 @@ async function execForAsset(asset, priceData) {
     const effectiveSigma = rawSigmaPerMin * getTimeDecayFactor(minsLeft);
     const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
     
-    // FIXED: Regime scalar now DIVIDES thresholds (high vol = lower barrier)
-    const regimeScalar = Math.sqrt(volRatio);
+    // FIXED: Regime scalar now CLAMPED to prevent extreme adjustments
+    const rawRegimeScalar = Math.sqrt(volRatio);
+    const regimeScalar = Math.max(REGIME_SCALAR_MIN, Math.min(REGIME_SCALAR_MAX, rawRegimeScalar));
 
     const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
     
@@ -597,8 +578,8 @@ async function execForAsset(asset, priceData) {
     const pDown = 1 - pUp;
 
     logger.log(
-      `σ_raw: $${rawSigmaPerMin.toFixed(4)} (Ratio: ${volRatio.toFixed(2)}x) | ` +
-      `Drift: $${drift.toFixed(4)}/min | Scalar: ${regimeScalar.toFixed(2)}x | z: ${z.toFixed(3)}`
+      `σ_raw: $${rawSigmaPerMin.toFixed(4)} (Ratio: ${volRatio.toFixed(2)}x, Scalar: ${rawRegimeScalar.toFixed(2)}x -> ${regimeScalar.toFixed(2)}x clamped) | ` +
+      `Drift: $${drift.toFixed(4)}/min | z: ${z.toFixed(3)}`
     );
 
     // 5) Order Books
@@ -649,13 +630,13 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    // FIXED: Z-thresholds now DIVIDED by regime scalar (high vol = lower barriers)
-    let zMinEarlyDynamic = Z_MIN_EARLY / Math.max(0.5, regimeScalar);
-    let zMinLateDynamic  = Z_MIN_LATE / Math.max(0.5, regimeScalar);
-    let zHugeDynamic     = Z_HUGE / Math.max(0.5, regimeScalar);
+    // FIXED: Z-thresholds now DIVIDED by regime scalar with proper clamping
+    let zMinEarlyDynamic = Z_MIN_EARLY / regimeScalar;
+    let zMinLateDynamic  = Z_MIN_LATE / regimeScalar;
+    let zHugeDynamic     = Z_HUGE / regimeScalar;
 
-    // Additional low-vol adjustment (if scalar < 1.0, we're in calm market)
-    if (regimeScalar < 1.0) {
+    // Additional low-vol adjustment (if raw scalar < 1.0, we're in calm market)
+    if (rawRegimeScalar < 1.0) {
       const LOW_VOL_BOOST = 0.85; // Further reduce barriers by 15%
       zMinEarlyDynamic *= LOW_VOL_BOOST;
       zMinLateDynamic  *= LOW_VOL_BOOST;
@@ -672,7 +653,7 @@ async function execForAsset(asset, priceData) {
         logger.log(`Skip VERY EARLY: |z|=${absZ.toFixed(3)} < ${Z_MIN_VERY_EARLY.toFixed(2)} (5-15 min requires high z)`);
         return;
       }
-      // Between 5-3 mins: medium threshold (was Z_HUGE = 4.0, now more sensible)
+      // Between 5-3 mins: medium threshold
       if (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_MIN_MID_EARLY) {
         logger.log(`Skip MID EARLY: |z|=${absZ.toFixed(3)} < ${Z_MIN_MID_EARLY.toFixed(2)} (3-5 min window)`);
         return;
@@ -706,7 +687,7 @@ async function execForAsset(asset, priceData) {
     // Use stricter z-threshold if we're in early window and early trading is enabled
     let effectiveZMin;
     if (ENABLE_EARLY_TRADING && minsLeft > 5) {
-      effectiveZMin = Z_MIN_VERY_EARLY; // 1.5 for very early
+      effectiveZMin = Z_MIN_VERY_EARLY; // 1.8 for very early
     } else {
       effectiveZMin = minsLeft > MINUTES_LEFT ? zMinEarlyDynamic : zMinLateDynamic;
     }
@@ -789,7 +770,7 @@ async function execForAsset(asset, priceData) {
           const corrCheck = checkCorrelationRisk(state, asset.symbol, lateSide, bigSize);
           
           if (capCheck.ok && corrCheck.ok) {
-            logger.log(`EXTREME: Buying ${bigSize} ${lateSide} @ ${limitPrice} (Kelly-sized)`);
+            logger.log(`EXTREME: Buying ${bigSize} ${lateSide} @ ${limitPrice} (Kelly-sized, z=${absZ.toFixed(2)})`);
             
             try {
               const resp = await client.createAndPostOrder({
@@ -968,7 +949,8 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size})`);
+    const sizeInfo = minsLeft > 5 ? ` (Early trade: ${(size / EARLY_TRADE_SIZE_MULTIPLIER).toFixed(0)} → ${size})` : '';
+    logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size}${sizeInfo})`);
     
     try {
       const resp = await client.createAndPostOrder({
@@ -1062,7 +1044,7 @@ async function execAll() {
 
 // === STARTUP & SCHEDULER ===
 (async () => {
-  console.log("Initializing Bot v2.0...");
+  console.log("Initializing Bot v2.1...");
 
   try {
     // 1. Warm up volatility with historical data
