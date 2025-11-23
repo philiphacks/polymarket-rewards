@@ -8,7 +8,7 @@ const MIN_DATA_POINTS = 10;
 // These are the "Minimum Volatility" floors in Basis Points per Minute.
 // If realized vol drops below this, we assume this floor to prevent noise trading.
 const MIN_VOL_BPS = {
-  BTC: 3.0,  // Lowered to capture more BTC volume (your best asset)
+  BTC: 3.5,  // Lowered to capture more BTC volume (your best asset)
   ETH: 5.0,  // Keep steady
   SOL: 8.0,  // Raised to reduce noise/churn (your worst asset)
   XRP: 6.0,  // Keep steady
