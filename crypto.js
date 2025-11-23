@@ -110,37 +110,6 @@ console.log("Address:", await signer.getAddress());
 const client = new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, SIGNATURE_TYPE, FUNDER);
 
 // ---------- STATISTICAL FUNCTIONS ----------
-
-// Student's t-distribution CDF (df = 5 for fat tails)
-function studentTCdf(t, df = 5) {
-  if (df <= 0) throw new Error("df must be positive");
-  
-  const x = df / (t * t + df);
-  const a = df / 2;
-  const b = 0.5;
-  
-  // Incomplete beta approximation
-  let beta;
-  if (x < 0 || x > 1) return t > 0 ? 1 : 0;
-  
-  // Simple approximation for beta function
-  const terms = 20;
-  let sum = 0;
-  for (let i = 0; i < terms; i++) {
-    const coef = Math.exp(
-      a * Math.log(x) + 
-      b * Math.log(1 - x) + 
-      i * Math.log(1 - x) - 
-      Math.log(b + i)
-    );
-    sum += coef;
-  }
-  beta = sum;
-  
-  const result = 0.5 + 0.5 * (t > 0 ? 1 : -1) * (1 - beta);
-  return Math.max(0, Math.min(1, result));
-}
-
 // Normal CDF (fallback)
 function normCdf(z) {
   const t = 1 / (1 + 0.2316419 * Math.abs(z));
