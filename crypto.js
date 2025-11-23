@@ -50,7 +50,7 @@ const ASSETS = [
 
 const BASIS_BUFFER_BPS = {
   BTC: 5,   // 0.05% (~$45 at $90k)
-  ETH: 7,   // 0.06%
+  ETH: 7,   // 0.07%
   SOL: 7,   // 0.07%
   XRP: 7
 };
