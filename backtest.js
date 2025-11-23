@@ -5,28 +5,109 @@ import readline from "readline";
 const CONFIG = {
   Z_MIN_EARLY: 1.0,
   Z_MIN_LATE: 0.7,
-  MIN_EDGE: 0.03,    // 3% edge required
+  MIN_EDGE: 0.03,
   MAX_SHARES: 500,
-  FEE_BPS: 10,       // 10bps = 0.1% fee per trade (Simulating slippage + taker fee)
+  FEE_BPS: 10,
+  
+  // NEW: Advanced features
+  USE_DRIFT: true,           // Toggle drift adjustment
+  USE_STUDENT_T: false,       // Toggle t-distribution vs normal
+  REGIME_INVERSION: false,    // Toggle inverted regime logic
+  KELLY_SIZING: false,        // Use Kelly vs fixed size
+  
+  // Risk controls
+  USE_MAX_DRAWDOWN: false,    // Toggle drawdown stop
+  MAX_DRAWDOWN_PCT: 0.30,     // Stop if down 30% (only if USE_MAX_DRAWDOWN = true)
+  
+  MIN_EDGE_BY_ASSET: {
+    BTC: 0.03,
+    ETH: 0.03,
+    SOL: 0.05,  // Require more edge for SOL
+    XRP: 0.04
+  }
 };
-const allTrades = [];
-// ==================================================
 
-// CHANGE THIS TO YOUR ACTUAL LOG FILE NAME
-const LOG_FILE = "ticks-20251121.jsonl"; 
+// ===================================================
+
+const LOG_FILE = "ticks-20251121.jsonl";
+const allTrades = [];
+
+// Student's t-CDF (df=5)
+function studentTCdf(t, df = 5) {
+  if (df <= 0) return t > 0 ? 1 : 0;
+  const x = df / (t * t + df);
+  const a = df / 2;
+  const b = 0.5;
+  
+  let beta;
+  if (x < 0 || x > 1) return t > 0 ? 1 : 0;
+  
+  const terms = 20;
+  let sum = 0;
+  for (let i = 0; i < terms; i++) {
+    const coef = Math.exp(
+      a * Math.log(x) + 
+      b * Math.log(1 - x) + 
+      i * Math.log(1 - x) - 
+      Math.log(b + i)
+    );
+    sum += coef;
+  }
+  beta = sum;
+  
+  const result = 0.5 + 0.5 * (t > 0 ? 1 : -1) * (1 - beta);
+  return Math.max(0, Math.min(1, result));
+}
+
+// Normal CDF
+function normCdf(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989423 * Math.exp(-0.5 * z * z);
+  let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  if (z > 0) p = 1 - p;
+  return p;
+}
+
+// Estimate drift from price history
+function estimateDrift(priceHistory) {
+  if (!priceHistory || priceHistory.length < 10) return 0;
+  
+  const n = priceHistory.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  
+  for (let i = 0; i < n; i++) {
+    const x = i;
+    const y = Math.log(priceHistory[i].price);
+    sumX += x;
+    sumY += y;
+    sumXY += x * y;
+    sumX2 += x * x;
+  }
+  
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  return slope * priceHistory[0].price;
+}
+
+// Kelly sizing
+function kellySize(prob, price, maxShares, fraction = 0.25) {
+  if (price >= 1 || price <= 0) return 10; // fallback
+  const odds = 1 / price - 1;
+  const kelly = (prob * odds - (1 - prob)) / odds;
+  const size = Math.max(0, kelly * fraction * maxShares);
+  return Math.min(Math.max(10, Math.floor(size / 10) * 10), maxShares);
+}
 
 async function runBacktest() {
   const fileStream = fs.createReadStream(LOG_FILE);
   const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
-  const markets = {}; 
+  const markets = {};
 
   console.log("⏳ Parsing logs...");
   
   for await (const line of rl) {
     try {
       const tick = JSON.parse(line);
-      // Group ticks by slug (unique market identifier)
       if (!markets[tick.slug]) {
         markets[tick.slug] = {
           symbol: tick.symbol,
@@ -34,10 +115,10 @@ async function runBacktest() {
           finalPrice: 0,
           startPrice: tick.startPrice,
           positions: { UP: 0, DOWN: 0, CASH: 0 },
+          trades: []
         };
       }
       markets[tick.slug].ticks.push(tick);
-      // Assume the last seen price is the settlement price
       markets[tick.slug].finalPrice = tick.currentPrice;
     } catch (e) { /* ignore corrupt lines */ }
   }
@@ -45,34 +126,78 @@ async function runBacktest() {
   console.log(`✅ Loaded ${Object.keys(markets).length} markets. Running simulation...\n`);
 
   let totalPnL = 0;
-  let totalVolume = 0; // Fixed: Now updated
+  let totalVolume = 0;
   let wins = 0;
   let losses = 0;
+  let stopTrading = false;
+  
+  // Store all market results with timestamps for proper drawdown calculation
+  const marketResults = [];
 
   // --- SIMULATION LOOP ---
   for (const slug in markets) {
-    const m = markets[slug];
+    // Only check stopTrading if drawdown protection is enabled
+    if (CONFIG.USE_MAX_DRAWDOWN && stopTrading) break;
     
-    // 1. Ensure Chronological Order (Critical for replay)
+    const m = markets[slug];
     m.ticks.sort((a, b) => a.ts - b.ts);
 
-    // 2. Replay Ticks
-    for (const tick of m.ticks) {
-      const { z, pUp, pDown, upAsk, downAsk, minsLeft } = tick;
+    // Build price history for drift
+    const priceHistory = m.ticks.map(t => ({ 
+      price: t.currentPrice, 
+      timestamp: t.ts 
+    }));
+
+    for (let i = 0; i < m.ticks.length; i++) {
+      const tick = m.ticks[i];
+      let { z, pUp, pDown, upAsk, downAsk, minsLeft, sigmaPerMin } = tick;
+
+      // Asset-specific edge requirement
+      const minEdge = CONFIG.MIN_EDGE_BY_ASSET[m.symbol] || CONFIG.MIN_EDGE;
       
-      const isEarly = minsLeft > 3;
-      const zReq = isEarly ? CONFIG.Z_MIN_EARLY : CONFIG.Z_MIN_LATE;
-      
-      // We assume fixed size of 10 shares per click for granular testing
-      const TRADE_SIZE = 10; 
+      // Drift adjustment
+      if (CONFIG.USE_DRIFT) {
+        const drift = estimateDrift(priceHistory.slice(0, i + 1));
+        const minsElapsed = 15 - minsLeft;
+        
+        // Recalculate z with drift
+        const sigmaT = sigmaPerMin * Math.sqrt(minsLeft);
+        z = (tick.currentPrice - tick.startPrice - drift * minsElapsed) / sigmaT;
+      }
+
+      // Student's t-distribution
+      if (CONFIG.USE_STUDENT_T) {
+        const tScore = z / Math.sqrt(1 + z * z / 5);
+        pUp = studentTCdf(tScore, 5);
+        pDown = 1 - pUp;
+      }
+
+      // Regime adjustment
+      let zReq;
+      if (CONFIG.REGIME_INVERSION) {
+        const volRatio = tick.volRatio || 1.0;
+        const regimeScalar = Math.sqrt(volRatio);
+        const baseZ = minsLeft > 3 ? CONFIG.Z_MIN_EARLY : CONFIG.Z_MIN_LATE;
+        zReq = baseZ / Math.max(0.5, regimeScalar);
+      } else {
+        zReq = minsLeft > 3 ? CONFIG.Z_MIN_EARLY : CONFIG.Z_MIN_LATE;
+      }
+
+      // Trade size
+      let tradeSize = 10;
+      if (CONFIG.KELLY_SIZING && upAsk && downAsk) {
+        tradeSize = kellySize(
+          z > 0 ? pUp : pDown, 
+          z > 0 ? upAsk : downAsk, 
+          CONFIG.MAX_SHARES
+        );
+      }
 
       // --- UP LOGIC ---
       if (upAsk && z >= zReq) {
         const ev = pUp - upAsk;
-        if (ev > CONFIG.MIN_EDGE) {
-          // Pass 'totalVolume' by reference? No, in JS primitives are by value.
-          // Easier to have executeTrade return the volume it generated.
-          const vol = executeTrade(m, "UP", upAsk, TRADE_SIZE);
+        if (ev > minEdge) {
+          const vol = executeTrade(m, "UP", upAsk, tradeSize, tick.ts);
           totalVolume += vol;
 
           allTrades.push({
@@ -81,8 +206,11 @@ async function runBacktest() {
             entryPrice: upAsk,
             modelProb: pUp,
             minsLeft: minsLeft,
-            size: TRADE_SIZE,
-            marketSlug: slug
+            size: tradeSize,
+            marketSlug: slug,
+            timestamp: tick.ts,
+            z: z,
+            ev: ev
           });
         }
       }
@@ -90,8 +218,8 @@ async function runBacktest() {
       // --- DOWN LOGIC ---
       if (downAsk && z <= -zReq) {
         const ev = pDown - downAsk;
-        if (ev > CONFIG.MIN_EDGE) {
-          const vol = executeTrade(m, "DOWN", downAsk, TRADE_SIZE);
+        if (ev > minEdge) {
+          const vol = executeTrade(m, "DOWN", downAsk, tradeSize, tick.ts);
           totalVolume += vol;
 
           allTrades.push({
@@ -100,84 +228,128 @@ async function runBacktest() {
             entryPrice: downAsk,
             modelProb: pDown,
             minsLeft: minsLeft,
-            size: TRADE_SIZE,
-            marketSlug: slug
+            size: tradeSize,
+            marketSlug: slug,
+            timestamp: tick.ts,
+            z: z,
+            ev: ev
           });
         }
       }
     }
 
     // --- SETTLEMENT ---
-    // If Final > Start, UP pays $1. Otherwise DOWN pays $1.
     const winner = m.finalPrice > m.startPrice ? "UP" : "DOWN";
-    
-    // Value of positions held
-    const payout = (m.positions[winner] || 0) * 1.0; 
-    
-    // Net Profit = Cash (negative from buying) + Payout
+    const payout = (m.positions[winner] || 0) * 1.0;
     const netProfit = m.positions.CASH + payout;
 
-    // Only log markets we traded in
     if (m.positions.UP > 0 || m.positions.DOWN > 0) {
       totalPnL += netProfit;
+      
+      // Store result with settlement timestamp (end of market)
+      const settlementTime = m.ticks[m.ticks.length - 1]?.ts || Date.now();
+      marketResults.push({
+        timestamp: settlementTime,
+        pnl: netProfit,
+        symbol: m.symbol,
+        slug: slug
+      });
+      
       if (netProfit > 0) wins++; else if (netProfit < 0) losses++;
       
-      // Verbose log for big PnL swings
       if (Math.abs(netProfit) > 0.5) {
-         console.log(
-            `[${m.symbol}] Result:${winner} | Price: ${m.startPrice.toFixed(2)}->${m.finalPrice.toFixed(2)} | ` +
-            `Pos: +${m.positions.UP}UP/+${m.positions.DOWN}DOWN | PnL: $${netProfit.toFixed(2)}`
-         );
+        console.log(
+          `[${m.symbol}] ${winner} | $${m.startPrice.toFixed(2)}→$${m.finalPrice.toFixed(2)} | ` +
+          `+${m.positions.UP}UP +${m.positions.DOWN}DN | PnL: $${netProfit.toFixed(2)}`
+        );
       }
     }
   }
 
+  // --- CALCULATE DRAWDOWN PROPERLY (after all results collected) ---
+  // Sort by settlement time
+  marketResults.sort((a, b) => a.timestamp - b.timestamp);
+  
+  console.log(`\n🔍 Calculating drawdown from ${marketResults.length} settled markets...`);
+  
+  let runningPnL = 0;
+  let peak = 0;
+  let maxDrawdown = 0; // RESET to 0 explicitly
+  let everWentPositive = false;
+  
+  for (const result of marketResults) {
+    runningPnL += result.pnl;
+    
+    // Only track peak once we've gone positive at least once
+    if (runningPnL > 0) {
+      if (!everWentPositive) {
+        console.log(`✅ First positive PnL at ${runningPnL.toFixed(2)}`);
+      }
+      everWentPositive = true;
+      if (runningPnL > peak) {
+        peak = runningPnL;
+      }
+    }
+    
+    // Only calculate drawdown if we've established a positive peak
+    if (everWentPositive && peak > 0) {
+      const drawdown = (peak - runningPnL) / peak;
+      if (drawdown > maxDrawdown && drawdown >= 0) {
+        maxDrawdown = drawdown;
+        console.log(`  New maxDD: ${(maxDrawdown*100).toFixed(1)}% at running PnL ${runningPnL.toFixed(2)} (peak was ${peak.toFixed(2)})`);
+      }
+    }
+  }
+  
+  // If never went positive, drawdown is meaningless
+  if (!everWentPositive) {
+    console.log(`⚠️  Never went positive - setting drawdown to 0`);
+    maxDrawdown = 0;
+  }
+  
+  console.log(`Peak: ${peak.toFixed(2)}, Final: ${runningPnL.toFixed(2)}, MaxDD: ${(maxDrawdown*100).toFixed(1)}%`);
+  
+  // FORCE OVERWRITE - in case there's a stale value somewhere
+  const finalMaxDrawdown = maxDrawdown;
+
+  // --- ANALYSIS ---
   runDeepAnalysis(allTrades, markets);
+  runAdvancedMetrics(allTrades, totalPnL, totalVolume);
 
   console.log("\n================ RESULTS ================");
-  console.log(`Config: Z_EARLY=${CONFIG.Z_MIN_EARLY}, EDGE=${CONFIG.MIN_EDGE}, FEE=${CONFIG.FEE_BPS}bps`);
-  console.log(`Total Markets Traded: ${wins + losses}`);
+  console.log(`Config: Z=${CONFIG.Z_MIN_EARLY}/${CONFIG.Z_MIN_LATE}, EDGE=${CONFIG.MIN_EDGE}, FEE=${CONFIG.FEE_BPS}bps`);
+  console.log(`Features: Drift=${CONFIG.USE_DRIFT}, t-dist=${CONFIG.USE_STUDENT_T}, Regime=${CONFIG.REGIME_INVERSION}, Kelly=${CONFIG.KELLY_SIZING}`);
+  console.log(`Max DD Stop: ${CONFIG.USE_MAX_DRAWDOWN ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Markets Traded: ${wins + losses}`);
   console.log(`Win Rate: ${((wins / (wins + losses || 1)) * 100).toFixed(1)}%`);
-  console.log(`Total Volume: $${totalVolume.toFixed(2)}`);
-  console.log(`TOTAL PnL: $${totalPnL.toFixed(2)}`);
+  console.log(`Total Volume: ${totalVolume.toFixed(2)}`);
+  console.log(`Max Drawdown: ${(finalMaxDrawdown * 100).toFixed(1)}%`);
+  console.log(`TOTAL PnL: ${totalPnL.toFixed(2)}`);
+  console.log(`Return on Volume: ${((totalPnL / totalVolume) * 100).toFixed(2)}%`);
   console.log("=========================================");
 }
 
 function runDeepAnalysis(trades, marketsMap) {
   console.log("\n\n📊 ============ DEEP DIVE ANALYSIS ============");
 
-  // Helper to calculate PnL per trade
   const calculateTradePnL = (trade) => {
     const m = marketsMap[trade.marketSlug];
     const winner = m.finalPrice > m.startPrice ? "UP" : "DOWN";
-    
-    // Did this specific trade win?
     const won = trade.side === winner;
-    
-    // Cost basis (including fee)
     const cost = trade.size * trade.entryPrice;
     const fee = cost * (CONFIG.FEE_BPS / 10000);
     const totalCost = cost + fee;
-    
-    // Payout ($1 per share if won, $0 if lost)
     const payout = won ? trade.size : 0;
-    
     return payout - totalCost;
   };
 
-  // ============================================
-  // A. CALIBRATION CHECK (God View)
-  // ============================================
+  // A. CALIBRATION CHECK
   console.log("\n--- [A] CALIBRATION CHECK ---");
-  console.log("(Does Model Probability match Win Rate?)");
-  
-  const buckets = {}; // "0.50", "0.55", "0.60"...
+  const buckets = {};
   
   trades.forEach(t => {
     const pnl = calculateTradePnL(t);
-    const won = pnl > 0; // Rough approximation (or check outcome strictly)
-    
-    // Round probability to nearest 0.05 (5%)
+    const won = pnl > 0;
     const bucket = (Math.floor(t.modelProb * 20) / 20).toFixed(2);
     
     if (!buckets[bucket]) buckets[bucket] = { total: 0, wins: 0, pnl: 0 };
@@ -186,27 +358,26 @@ function runDeepAnalysis(trades, marketsMap) {
     buckets[bucket].pnl += pnl;
   });
 
-  console.log("Prob Bucket | Trades | Actual Win% | Avg PnL/Trade");
+  console.log("Prob Range  | Trades | Actual Win% | Expected | Diff   | Avg PnL");
   Object.keys(buckets).sort().forEach(b => {
     const d = buckets[b];
     const actualWinRate = (d.wins / d.total);
     const predicted = parseFloat(b);
     const diff = actualWinRate - predicted;
-    const alert = Math.abs(diff) > 0.10 ? "⚠️" : "✅"; // Warn if >10% off
+    const alert = Math.abs(diff) > 0.10 ? "⚠️" : "✅";
     
     console.log(
-      `${b}-${(parseFloat(b)+0.05).toFixed(2)}   | ` +
+      `${b}-${(parseFloat(b)+0.05).toFixed(2)} | ` +
       `${d.total.toString().padEnd(6)} | ` +
-      `${(actualWinRate * 100).toFixed(1)}% ${alert}      | ` +
+      `${(actualWinRate * 100).toFixed(1)}%      | ` +
+      `${(predicted * 100).toFixed(1)}%    | ` +
+      `${(diff * 100).toFixed(1)}% ${alert} | ` +
       `$${(d.pnl / d.total).toFixed(3)}`
     );
   });
 
-  // ============================================
-  // B. THE LATE GAME TRAP
-  // ============================================
-  console.log("\n--- [B] TIME ANALYSIS (Late Game Trap) ---");
-  
+  // B. TIME ANALYSIS
+  console.log("\n--- [B] TIME ANALYSIS (Entry Timing) ---");
   const timeStats = {
     "Early (>5m)": { pnl: 0, count: 0 },
     "Mid   (2-5m)": { pnl: 0, count: 0 },
@@ -224,52 +395,141 @@ function runDeepAnalysis(trades, marketsMap) {
   });
 
   for (const [key, stat] of Object.entries(timeStats)) {
-    console.log(`${key} : PnL $${stat.pnl.toFixed(2)} (${stat.count} trades)`);
+    const avgPnL = stat.count > 0 ? stat.pnl / stat.count : 0;
+    console.log(
+      `${key} : PnL $${stat.pnl.toFixed(2)} (${stat.count} trades, ` +
+      `Avg: $${avgPnL.toFixed(3)})`
+    );
   }
 
-  // ============================================
-  // C. ASSET CORRELATION (Bad Asset Filter)
-  // ============================================
+  // C. ASSET PERFORMANCE
   console.log("\n--- [C] ASSET PERFORMANCE ---");
   const assetStats = {};
 
   trades.forEach(t => {
     const pnl = calculateTradePnL(t);
-    if (!assetStats[t.symbol]) assetStats[t.symbol] = { pnl: 0, vol: 0, trades: 0 };
+    if (!assetStats[t.symbol]) {
+      assetStats[t.symbol] = { pnl: 0, vol: 0, trades: 0, wins: 0 };
+    }
     
     assetStats[t.symbol].pnl += pnl;
     assetStats[t.symbol].trades++;
     assetStats[t.symbol].vol += (t.size * t.entryPrice);
+    if (pnl > 0) assetStats[t.symbol].wins++;
   });
 
-  Object.keys(assetStats).forEach(sym => {
+  console.log("Symbol | PnL      | Trades | Win%   | Volume   | RoV");
+  Object.keys(assetStats).sort().forEach(sym => {
     const s = assetStats[sym];
-    console.log(`[${sym}] PnL: $${s.pnl.toFixed(2)} | Trades: ${s.trades} | Vol: $${s.vol.toFixed(0)}`);
+    const winRate = (s.wins / s.trades) * 100;
+    const rov = (s.pnl / s.vol) * 100;
+    console.log(
+      `${sym.padEnd(6)} | ` +
+      `$${s.pnl.toFixed(2).padStart(7)} | ` +
+      `${s.trades.toString().padStart(6)} | ` +
+      `${winRate.toFixed(1).padStart(5)}% | ` +
+      `$${s.vol.toFixed(0).padStart(7)} | ` +
+      `${rov.toFixed(2)}%`
+    );
+  });
+
+  // D. Z-SCORE ANALYSIS
+  console.log("\n--- [D] Z-SCORE EFFECTIVENESS ---");
+  const zBuckets = {};
+  
+  trades.forEach(t => {
+    const pnl = calculateTradePnL(t);
+    const absZ = Math.abs(t.z);
+    let bucket = "0.0-1.0";
+    if (absZ >= 1.0 && absZ < 1.5) bucket = "1.0-1.5";
+    if (absZ >= 1.5 && absZ < 2.0) bucket = "1.5-2.0";
+    if (absZ >= 2.0 && absZ < 3.0) bucket = "2.0-3.0";
+    if (absZ >= 3.0) bucket = "3.0+";
+    
+    if (!zBuckets[bucket]) zBuckets[bucket] = { pnl: 0, count: 0, wins: 0 };
+    zBuckets[bucket].pnl += pnl;
+    zBuckets[bucket].count++;
+    if (pnl > 0) zBuckets[bucket].wins++;
+  });
+
+  console.log("Z Range | Trades | Win%   | Avg PnL");
+  ["0.0-1.0", "1.0-1.5", "1.5-2.0", "2.0-3.0", "3.0+"].forEach(key => {
+    const d = zBuckets[key];
+    if (!d || d.count === 0) return;
+    const winRate = (d.wins / d.count) * 100;
+    const avgPnL = d.pnl / d.count;
+    console.log(
+      `${key.padEnd(7)} | ${d.count.toString().padStart(6)} | ` +
+      `${winRate.toFixed(1).padStart(5)}% | $${avgPnL.toFixed(4)}`
+    );
   });
   
   console.log("============================================\n");
 }
 
-function executeTrade(market, side, price, size) {
-  const currentSize = market.positions[side] || 0;
+function runAdvancedMetrics(trades, totalPnL, totalVolume) {
+  console.log("\n--- [E] ADVANCED METRICS ---");
+  
+  // Sharpe Ratio
+  const dailyReturns = [];
+  let currentDay = null;
+  let dayPnL = 0;
+  
+  trades.forEach(t => {
+    const day = new Date(t.timestamp).toDateString();
+    if (currentDay !== day) {
+      if (currentDay !== null) dailyReturns.push(dayPnL);
+      currentDay = day;
+      dayPnL = 0;
+    }
+    dayPnL += t.ev * t.size;
+  });
+  if (dayPnL !== 0) dailyReturns.push(dayPnL);
+  
+  if (dailyReturns.length > 1) {
+    const avgReturn = dailyReturns.reduce((a,b) => a+b, 0) / dailyReturns.length;
+    const variance = dailyReturns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / dailyReturns.length;
+    const stdDev = Math.sqrt(variance);
+    const sharpe = stdDev > 0 ? avgReturn / stdDev : 0;
+    
+    console.log(`Daily Sharpe Ratio: ${sharpe.toFixed(2)}`);
+    console.log(`Avg Daily PnL: $${avgReturn.toFixed(2)} ± $${stdDev.toFixed(2)}`);
+  }
+  
+  // Profit Factor
+  let grossWins = 0, grossLosses = 0;
+  trades.forEach(t => {
+    const estimatedPnL = t.ev * t.size;
+    if (estimatedPnL > 0) grossWins += estimatedPnL;
+    else grossLosses += Math.abs(estimatedPnL);
+  });
+  
+  const profitFactor = grossLosses > 0 ? grossWins / grossLosses : 0;
+  console.log(`Profit Factor: ${profitFactor.toFixed(2)}`);
+  
+  console.log(`Total Trades: ${trades.length}`);
+  console.log(`Avg Entry Time: ${(trades.reduce((sum, t) => sum + (15 - t.minsLeft), 0) / trades.length).toFixed(1)} mins into market`);
+}
 
-  // Cap Check
+function executeTrade(market, side, price, size, timestamp) {
+  const currentSize = market.positions[side] || 0;
   if (currentSize + size > CONFIG.MAX_SHARES) return 0;
 
-  // Execution
   market.positions[side] += size;
-  
   const rawCost = size * price;
-  
-  // Fee Calculation: (Cost * BPS) / 10000
   const fee = rawCost * (CONFIG.FEE_BPS / 10000);
-  
   const totalCost = rawCost + fee;
-
   market.positions.CASH -= totalCost;
   
-  // Return volume (raw cost) to be added to global total
-  return rawCost; 
+  market.trades.push({
+    side,
+    price,
+    size,
+    timestamp,
+    cost: totalCost
+  });
+  
+  return rawCost;
 }
 
 runBacktest();
