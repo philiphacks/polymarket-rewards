@@ -77,7 +77,7 @@ const MIN_EDGE_EARLY = 0.05;
 const MIN_EDGE_LATE  = 0.03;
 
 // EARLY TRADING CONFIG (5-15 mins left)
-const ENABLE_EARLY_TRADING = false; // Toggle this to enable/disable early trading
+const ENABLE_EARLY_TRADING = true; // Toggle this to enable/disable early trading
 const Z_MIN_VERY_EARLY = 1.8; // Stricter z-threshold for 5+ min window (was 1.5)
 const Z_MIN_MID_EARLY = 1.4;  // Medium threshold for 3-5 min window (was 1.2)
 // Note: Z_MIN_LATE = 0.7 for <3 mins (defined below)
@@ -187,6 +187,28 @@ function kellySize(prob, price, maxShares, fraction = 0.15) {
   const size = Math.max(0, kelly * fraction * maxShares);
   return Math.min(size, maxShares);
 }
+
+// function kellySize(prob, price, maxShares, fraction = 0.15) {
+//   // Edge cases
+//   if (price >= 0.99 || price <= 0.01) return 10; // fallback for extreme prices
+//   if (prob <= price) return 10; // no edge, minimum bet
+  
+//   // Kelly formula for binary outcomes: (p - price) / (1 - price)
+//   // Where you pay 'price' and get $1 if you win
+//   const kellyFraction = (prob - price) / (1 - price);
+  
+//   // Apply fractional Kelly for risk management
+//   const fractionalKelly = kellyFraction * fraction;
+  
+//   // Convert to share size (as a fraction of max position)
+//   const rawSize = fractionalKelly * maxShares;
+  
+//   // Round to nearest 10 shares, minimum 10
+//   const roundedSize = Math.max(10, Math.floor(rawSize / 10) * 10);
+  
+//   // Cap at maxShares
+//   return Math.min(roundedSize, maxShares);
+// }
 
 // Correlation-adjusted position limit check
 function checkCorrelationRisk(state, newSymbol, newSide, newSize) {
