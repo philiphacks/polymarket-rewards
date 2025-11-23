@@ -232,6 +232,19 @@ async function runBacktest() {
         zReq = minsLeft > 3 ? CONFIG.Z_MIN_EARLY : CONFIG.Z_MIN_LATE;
       }
 
+      const absZ = Math.abs(zReq);
+      if (minsLeft > 5) {
+        continue; // Skip this tick entirely
+      }
+
+      if (minsLeft > 3 && minsLeft <= 5 && absZ < 4.0) {
+        continue; // Only trade extreme signals between 5-3 mins
+      }
+
+      if (minsLeft <= 3 && absZ < zReq) {
+        continue; // Normal z-threshold for <3 mins
+      }
+
       // Trade size
       const modelProbForTrade = z > 0 ? pUp : pDown;
       const priceForTrade = z > 0 ? upAsk : downAsk;
