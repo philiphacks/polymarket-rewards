@@ -50,19 +50,12 @@ const ASSETS = [
 
 const BASIS_BUFFER_BPS = {
   BTC: 5,   // 0.05% (~$45 at $90k)
-  ETH: 7,   // 0.07%
+  ETH: 6,   // 0.06%
   SOL: 7,   // 0.07%
   XRP: 7
 };
 
 const MAX_SHARES_PER_MARKET = { BTC: 600, ETH: 300, SOL: 300, XRP: 200 };
-
-const ASSET_SPECIFIC_KELLY_FRACTION = {
-  BTC: 0.15,
-  ETH: 0.08,  // Half the exposure - ETH is risky
-  SOL: 0.15,
-  XRP: 0.15
-};
 
 // Correlation matrix (for position limits)
 const CORRELATION_MATRIX = {
@@ -79,6 +72,12 @@ const MINUTES_LEFT = 3;
 const MIN_EDGE_EARLY = 0.05;
 const MIN_EDGE_LATE  = 0.03;
 
+// EARLY TRADING CONFIG (5-15 mins left)
+const ENABLE_EARLY_TRADING = false; // Toggle this to enable/disable early trading
+const Z_MIN_VERY_EARLY = 1.5; // Stricter z-threshold for 5+ min window
+const Z_MIN_MID_EARLY = 1.2;  // Medium threshold for 3-5 min window
+// Note: Z_MIN_LATE = 0.7 for <3 mins (defined below)
+
 // Base z-thresholds (Now INVERTED - will be divided by regime scalar)
 const Z_MIN_EARLY = 1.0;
 const Z_MIN_LATE  = 0.7;
@@ -94,6 +93,7 @@ const Z_HUGE = 4.0;
 const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.98;
+const KELLY_FRACTION = 0.15; // Optimal from backtesting (0.15 = best RoV)
 
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
@@ -116,6 +116,37 @@ console.log("Address:", await signer.getAddress());
 const client = new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, SIGNATURE_TYPE, FUNDER);
 
 // ---------- STATISTICAL FUNCTIONS ----------
+
+// Student's t-distribution CDF (df = 5 for fat tails)
+function studentTCdf(t, df = 5) {
+  if (df <= 0) throw new Error("df must be positive");
+  
+  const x = df / (t * t + df);
+  const a = df / 2;
+  const b = 0.5;
+  
+  // Incomplete beta approximation
+  let beta;
+  if (x < 0 || x > 1) return t > 0 ? 1 : 0;
+  
+  // Simple approximation for beta function
+  const terms = 20;
+  let sum = 0;
+  for (let i = 0; i < terms; i++) {
+    const coef = Math.exp(
+      a * Math.log(x) + 
+      b * Math.log(1 - x) + 
+      i * Math.log(1 - x) - 
+      Math.log(b + i)
+    );
+    sum += coef;
+  }
+  beta = sum;
+  
+  const result = 0.5 + 0.5 * (t > 0 ? 1 : -1) * (1 - beta);
+  return Math.max(0, Math.min(1, result));
+}
+
 // Normal CDF (fallback)
 function normCdf(z) {
   const t = 1 / (1 + 0.2316419 * Math.abs(z));
@@ -618,7 +649,7 @@ async function execForAsset(asset, priceData) {
     let zHugeDynamic     = Z_HUGE / Math.max(0.5, regimeScalar);
 
     // Additional low-vol adjustment (if scalar < 1.0, we're in calm market)
-    if (regimeScalar < 1.1) {
+    if (regimeScalar < 1.0) {
       const LOW_VOL_BOOST = 0.85; // Further reduce barriers by 15%
       zMinEarlyDynamic *= LOW_VOL_BOOST;
       zMinLateDynamic  *= LOW_VOL_BOOST;
@@ -627,36 +658,69 @@ async function execForAsset(asset, priceData) {
       logger.log(`[Low Vol Regime] Further reducing Z-thresholds. New Early/Late: ${zMinEarlyDynamic.toFixed(2)} / ${zMinLateDynamic.toFixed(2)}`);
     }
 
-    // Gating Log
-    if (
-      minsLeft > 5 ||
-      (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < zHugeDynamic) ||
-      (minsLeft <= MINUTES_LEFT && absZ < zMinLateDynamic)
-    ) {
-      const evUp = upAsk ? pUp - upAsk : 0;
-      const evDown = downAsk ? pDown - downAsk : 0;
-      logger.log(`Skip: |z|=${absZ.toFixed(3)} < Req (Huge=${zHugeDynamic.toFixed(2)}, Min=${zMinLateDynamic.toFixed(2)}) | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
-      return;
+    // Gating Log - UPDATED WITH EARLY TRADING LOGIC
+    if (ENABLE_EARLY_TRADING) {
+      // With early trading enabled: graduated thresholds based on time
+      // More time = higher z required (more conservative)
+      if (minsLeft > 5 && absZ < Z_MIN_VERY_EARLY) {
+        logger.log(`Skip VERY EARLY: |z|=${absZ.toFixed(3)} < ${Z_MIN_VERY_EARLY.toFixed(2)} (5-15 min requires high z)`);
+        return;
+      }
+      // Between 5-3 mins: medium threshold (was Z_HUGE = 4.0, now more sensible)
+      if (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_MIN_MID_EARLY) {
+        logger.log(`Skip MID EARLY: |z|=${absZ.toFixed(3)} < ${Z_MIN_MID_EARLY.toFixed(2)} (3-5 min window)`);
+        return;
+      }
+      // Below 3 mins: lowest threshold (most aggressive)
+      if (minsLeft <= MINUTES_LEFT && absZ < zMinLateDynamic) {
+        const evUp = upAsk ? pUp - upAsk : 0;
+        const evDown = downAsk ? pDown - downAsk : 0;
+        logger.log(`Skip LATE: |z|=${absZ.toFixed(3)} < ${zMinLateDynamic.toFixed(2)} | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
+        return;
+      }
+    } else {
+      // Original gating logic (early trading disabled)
+      if (minsLeft > 5) {
+        logger.log(`Skip: Early trading disabled (${minsLeft.toFixed(1)} mins left)`);
+        return;
+      }
+      if (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < zHugeDynamic) {
+        logger.log(`Skip: |z|=${absZ.toFixed(3)} < Huge=${zHugeDynamic.toFixed(2)}`);
+        return;
+      }
+      if (minsLeft <= MINUTES_LEFT && absZ < zMinLateDynamic) {
+        const evUp = upAsk ? pUp - upAsk : 0;
+        const evDown = downAsk ? pDown - downAsk : 0;
+        logger.log(`Skip: |z|=${absZ.toFixed(3)} < Min=${zMinLateDynamic.toFixed(2)} | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
+        return;
+      }
     }
 
-    // 7) Trade Logic - Directional
-    const directionalZMin = minsLeft > MINUTES_LEFT ? zMinEarlyDynamic : zMinLateDynamic;
+    // 7) Trade Logic - Directional (UPDATED FOR EARLY TRADING)
+    // Use stricter z-threshold if we're in early window and early trading is enabled
+    let effectiveZMin;
+    if (ENABLE_EARLY_TRADING && minsLeft > 5) {
+      effectiveZMin = Z_MIN_VERY_EARLY; // 1.5 for very early
+    } else {
+      effectiveZMin = minsLeft > MINUTES_LEFT ? zMinEarlyDynamic : zMinLateDynamic;
+    }
+    
     let candidates = [];
 
-    if (z >= directionalZMin && upAsk) {
+    if (z >= effectiveZMin && upAsk) {
       const evBuyUp = pUp - upAsk;
       logger.log(`Up ask=${upAsk.toFixed(3)}, EV buy Up=${evBuyUp.toFixed(4)}`);
       candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
     } else {
-      logger.log(`We don't buy Up here (z=${z.toFixed(3)} too small or no ask).`);
+      logger.log(`We don't buy Up here (z=${z.toFixed(3)} < ${effectiveZMin.toFixed(2)} or no ask).`);
     }
 
-    if (z <= -directionalZMin && downAsk) {
+    if (z <= -effectiveZMin && downAsk) {
       const evBuyDown = pDown - downAsk;
       logger.log(`Down ask=${downAsk.toFixed(3)}, EV buy Down=${evBuyDown.toFixed(4)}`);
       candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
     } else {
-      logger.log(`We don't buy Down here (z=${z.toFixed(3)} too small or no ask).`);
+      logger.log(`We don't buy Down here (z=${z.toFixed(3)} > ${-effectiveZMin.toFixed(2)} or no ask).`);
     }
 
     // Dynamic edge requirements
@@ -712,7 +776,7 @@ async function execForAsset(asset, priceData) {
           const maxShares = MAX_SHARES_PER_MARKET[asset.symbol] || 500;
           
           // Use Kelly instead of fixed fraction
-          const kellyShares = kellySize(sideProb, limitPrice, maxShares, ASSET_SPECIFIC_KELLY_FRACTION[asset.symbol] || 0.15);
+          const kellyShares = kellySize(sideProb, limitPrice, maxShares, KELLY_FRACTION);
           const bigSize = Math.max(10, Math.floor(kellyShares / 10) * 10); // Round to 10
 
           const capCheck = canPlaceOrder(state, slug, lateSide, bigSize, asset.symbol);
@@ -743,7 +807,7 @@ async function execForAsset(asset, priceData) {
 
                 // Monitor order in background
                 pendingOrders.set(resp.orderID, { asset: asset.symbol, side: lateSide, size: bigSize, timestamp: Date.now() });
-                // monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, bigSize, logger);
+                monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, bigSize, logger);
 
                 addPosition(state, slug, lateSide, bigSize);
                 state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
@@ -852,7 +916,7 @@ async function execForAsset(asset, priceData) {
 
               // Monitor in background
               pendingOrders.set(resp.orderID, { asset: asset.symbol, side: lateSide, size: layerSize, timestamp: Date.now() });
-              // monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, layerSize, logger);
+              monitorAndCancelOrder(resp.orderID, asset.symbol, lateSide, layerSize, logger);
 
               addPosition(state, slug, lateSide, layerSize);
               state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
@@ -924,7 +988,7 @@ async function execForAsset(asset, priceData) {
 
         // Monitor in background
         pendingOrders.set(resp.orderID, { asset: asset.symbol, side: best.side, size, timestamp: Date.now() });
-        // monitorAndCancelOrder(resp.orderID, asset.symbol, best.side, size, logger);
+        monitorAndCancelOrder(resp.orderID, asset.symbol, best.side, size, logger);
 
         addPosition(state, slug, best.side, size);
         state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + size;
