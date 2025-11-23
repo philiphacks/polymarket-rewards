@@ -636,7 +636,7 @@ async function execForAsset(asset, priceData) {
     let zHugeDynamic     = Z_HUGE / regimeScalar;
 
     // Additional low-vol adjustment (if raw scalar < 1.0, we're in calm market)
-    if (rawRegimeScalar < 1.0) {
+    if (rawRegimeScalar < 1.1) {
       const LOW_VOL_BOOST = 0.85; // Further reduce barriers by 15%
       zMinEarlyDynamic *= LOW_VOL_BOOST;
       zMinLateDynamic  *= LOW_VOL_BOOST;
