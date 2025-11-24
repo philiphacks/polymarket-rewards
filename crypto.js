@@ -886,7 +886,7 @@ async function execForAsset(asset, priceData) {
         lateSide = "UP"; 
         sideProb = pUp; 
         sideAsk = upAsk || 0.99; 
-      } else if (pDown >= pReq && z < -zMinLateDynamic) { 
+      } else if (pDown >= pReq && z < -Math.max(zMinLateDynamic, 0.3)) {
         lateSide = "DOWN"; 
         sideProb = pDown; 
         sideAsk = downAsk || 0.99; 
