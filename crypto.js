@@ -177,38 +177,38 @@ function estimateDrift(symbol, windowMinutes = 60) {
 }
 
 // Kelly Criterion for position sizing
-function kellySize(prob, price, maxShares, fraction = 0.15) {
-  if (price >= 1 || price <= 0) return 0;
-  
-  const odds = 1 / price - 1;
-  const kelly = (prob * odds - (1 - prob)) / odds;
-  
-  // Use fractional Kelly (0.15 = 15% Kelly - optimal balance from backtesting)
-  const size = Math.max(0, kelly * fraction * maxShares);
-  return Math.min(size, maxShares);
-}
-
 // function kellySize(prob, price, maxShares, fraction = 0.15) {
-//   // Edge cases
-//   if (price >= 0.99 || price <= 0.01) return 10; // fallback for extreme prices
-//   if (prob <= price) return 10; // no edge, minimum bet
+//   if (price >= 1 || price <= 0) return 0;
   
-//   // Kelly formula for binary outcomes: (p - price) / (1 - price)
-//   // Where you pay 'price' and get $1 if you win
-//   const kellyFraction = (prob - price) / (1 - price);
+//   const odds = 1 / price - 1;
+//   const kelly = (prob * odds - (1 - prob)) / odds;
   
-//   // Apply fractional Kelly for risk management
-//   const fractionalKelly = kellyFraction * fraction;
-  
-//   // Convert to share size (as a fraction of max position)
-//   const rawSize = fractionalKelly * maxShares;
-  
-//   // Round to nearest 10 shares, minimum 10
-//   const roundedSize = Math.max(10, Math.floor(rawSize / 10) * 10);
-  
-//   // Cap at maxShares
-//   return Math.min(roundedSize, maxShares);
+//   // Use fractional Kelly (0.15 = 15% Kelly - optimal balance from backtesting)
+//   const size = Math.max(0, kelly * fraction * maxShares);
+//   return Math.min(size, maxShares);
 // }
+
+function kellySize(prob, price, maxShares, fraction = 0.15) {
+  // Edge cases
+  if (price >= 0.99 || price <= 0.01) return 10; // fallback for extreme prices
+  if (prob <= price) return 10; // no edge, minimum bet
+  
+  // Kelly formula for binary outcomes: (p - price) / (1 - price)
+  // Where you pay 'price' and get $1 if you win
+  const kellyFraction = (prob - price) / (1 - price);
+  
+  // Apply fractional Kelly for risk management
+  const fractionalKelly = kellyFraction * fraction;
+  
+  // Convert to share size (as a fraction of max position)
+  const rawSize = fractionalKelly * maxShares;
+  
+  // Round to nearest 10 shares, minimum 10
+  const roundedSize = Math.max(10, Math.floor(rawSize / 10) * 10);
+  
+  // Cap at maxShares
+  return Math.min(roundedSize, maxShares);
+}
 
 // Correlation-adjusted position limit check
 function checkCorrelationRisk(state, newSymbol, newSide, newSize) {
@@ -695,25 +695,6 @@ async function execForAsset(asset, priceData) {
       sharesUp, sharesDown,
     });
 
-    // 6) Decision Gating with Basis Risk Check
-    const basisCheck = checkBasisRiskHybrid(
-      currentPrice, 
-      startPrice, 
-      minsLeft, 
-      z, 
-      pUp, 
-      pDown, 
-      upAsk, 
-      downAsk, 
-      asset, 
-      logger
-    );
-
-    if (!basisCheck.safe) {
-      logger.log(`Skipping trade: ${basisCheck.reason}`);
-      return;
-    }
-
     // FIXED: Z-thresholds now DIVIDED by regime scalar with proper clamping
     let zMinEarlyDynamic = Z_MIN_EARLY / regimeScalar;
     let zMinLateDynamic  = Z_MIN_LATE / regimeScalar;
@@ -768,6 +749,25 @@ async function execForAsset(asset, priceData) {
         logger.log(`Skip: |z|=${absZ.toFixed(3)} < Min=${zMinLateDynamic.toFixed(2)} | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
         return;
       }
+    }
+
+    // 6) Decision Gating with Basis Risk Check
+    const basisCheck = checkBasisRiskHybrid(
+      currentPrice,
+      startPrice,
+      minsLeft,
+      z,
+      pUp,
+      pDown,
+      upAsk,
+      downAsk,
+      asset,
+      logger
+    );
+
+    if (!basisCheck.safe) {
+      logger.log(`Skipping trade: ${basisCheck.reason}`);
+      return;
     }
 
     // 7) Trade Logic - Directional (UPDATED FOR EARLY TRADING)
