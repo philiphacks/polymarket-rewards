@@ -143,7 +143,6 @@ const driftCache = {}; // symbol -> { drift, lastUpdate }
 function estimateDrift(symbol, windowMinutes = 60) {
   const now = Date.now();
   
-  // Use cached if < 5 minutes old
   if (driftCache[symbol] && now - driftCache[symbol].lastUpdate < 300000) {
     return driftCache[symbol].drift;
   }
@@ -151,27 +150,27 @@ function estimateDrift(symbol, windowMinutes = 60) {
   const history = VolatilityManager.getPriceHistory(symbol, windowMinutes);
   if (!history || history.length < 10) return 0;
   
-  // Linear regression: ln(price) = a + b*time
   const n = history.length;
   let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
-  
+
+  const baseTime = history[0].timestamp;
+
   for (let i = 0; i < n; i++) {
-    const x = i; // time index
-    const y = Math.log(history[i].price); // log returns
+    const x = (history[i].timestamp - baseTime) / 60000; // ← CHANGED
+    const y = Math.log(history[i].price);
     sumX += x;
     sumY += y;
     sumXY += x * y;
     sumX2 += x * x;
   }
   
-  // Check for division by zero
   const denominator = n * sumX2 - sumX * sumX;
   if (Math.abs(denominator) < 1e-10) return 0;
   
   const slope = (n * sumXY - sumX * sumY) / denominator;
   
-  // Convert to drift per minute in dollars
-  const driftPerMinute = slope * history[0].price;
+  const currentPrice = history[history.length - 1].price; // ← CHANGED
+  const driftPerMinute = slope * currentPrice;
   
   driftCache[symbol] = { drift: driftPerMinute, lastUpdate: now };
   return driftPerMinute;
