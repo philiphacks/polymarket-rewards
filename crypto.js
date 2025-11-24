@@ -83,7 +83,6 @@ const Z_MIN_MID_EARLY = 1.4;  // Medium threshold for 3-5 min window (was 1.2)
 
 const Z_MIN_EARLY = 1.0;
 const Z_MIN_LATE  = 0.8;
-const Z_MIN_VERY_LATE = 0.7;
 const MAX_SHARES_WEAK_SIGNAL = 70;
 
 // Regime scalar bounds (prevent extreme adjustments)
