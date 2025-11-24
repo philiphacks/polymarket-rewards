@@ -862,7 +862,6 @@ async function execForAsset(asset, priceData) {
 
     // 7) Trade Logic - Directional (UPDATED FOR EARLY TRADING)
     // Use stricter z-threshold if we're in early window and early trading is enabled
-    let effectiveZMin;
     if (ENABLE_EARLY_TRADING && minsLeft > 5) {
       effectiveZMin = Z_MIN_VERY_EARLY; // 1.8 for very early
     } else {
