@@ -742,41 +742,45 @@ async function execForAsset(asset, priceData) {
     }
 
     // Gating Log - UPDATED WITH EARLY TRADING LOGIC
+    let effectiveZMin;
+
     if (ENABLE_EARLY_TRADING) {
-      // With early trading enabled: graduated thresholds based on time
-      // More time = higher z required (more conservative)
-      if (minsLeft > 5 && absZ < Z_MIN_VERY_EARLY) {
-        logger.log(`Skip VERY EARLY: |z|=${absZ.toFixed(3)} < ${Z_MIN_VERY_EARLY.toFixed(2)} (5-15 min requires high z)`);
-        return;
-      }
-      // Between 5-3 mins: medium threshold
-      if (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < Z_MIN_MID_EARLY) {
-        logger.log(`Skip MID EARLY: |z|=${absZ.toFixed(3)} < ${Z_MIN_MID_EARLY.toFixed(2)} (3-5 min window)`);
-        return;
-      }
-      // Below 3 mins: lowest threshold (most aggressive)
-      if (minsLeft <= MINUTES_LEFT && absZ < zMinLateDynamic) {
-        const evUp = upAsk ? pUp - upAsk : 0;
-        const evDown = downAsk ? pDown - downAsk : 0;
-        logger.log(`Skip LATE: |z|=${absZ.toFixed(3)} < ${zMinLateDynamic.toFixed(2)} | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
-        return;
+      // Graduated thresholds based on time
+      if (minsLeft > 5) {
+        effectiveZMin = Z_MIN_VERY_EARLY; // 1.8
+      } else if (minsLeft > 3) {
+        effectiveZMin = Z_MIN_MID_EARLY; // 1.4
+      } else if (minsLeft > 2) {
+        effectiveZMin = 1.0 * regimeScalar; // 1.0 (NEW! Raised from 0.7)
+      } else {
+        effectiveZMin = Z_MIN_LATE * regimeScalar; // 0.7
       }
     } else {
-      // Original gating logic (early trading disabled)
+      // Early trading disabled
       if (minsLeft > 5) {
         logger.log(`Skip: Early trading disabled (${minsLeft.toFixed(1)} mins left)`);
         return;
       }
-      if (minsLeft > MINUTES_LEFT && minsLeft <= 5 && absZ < zHugeDynamic) {
-        logger.log(`Skip: |z|=${absZ.toFixed(3)} < Huge=${zHugeDynamic.toFixed(2)}`);
-        return;
+      if (minsLeft > 3) {
+        effectiveZMin = zHugeDynamic; // 2.8
+      } else if (minsLeft > 2) {
+        effectiveZMin = 1.0 * regimeScalar; // 1.0 (NEW! Raised from 0.7)
+      } else {
+        effectiveZMin = zMinLateDynamic; // 0.7
       }
-      if (minsLeft <= MINUTES_LEFT && absZ < zMinLateDynamic) {
-        const evUp = upAsk ? pUp - upAsk : 0;
-        const evDown = downAsk ? pDown - downAsk : 0;
-        logger.log(`Skip: |z|=${absZ.toFixed(3)} < Min=${zMinLateDynamic.toFixed(2)} | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
-        return;
-      }
+    }
+
+    // Apply low-vol adjustment to effective threshold
+    if (rawRegimeScalar < 1.1 && minsLeft > 2) {
+      effectiveZMin *= 0.85;
+    }
+
+    // Single gating check
+    if (absZ < effectiveZMin) {
+      const evUp = upAsk ? pUp - upAsk : 0;
+      const evDown = downAsk ? pDown - downAsk : 0;
+      logger.log(`Skip: |z|=${absZ.toFixed(3)} < ${effectiveZMin.toFixed(2)} (${minsLeft.toFixed(1)}min left) | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
+      return;
     }
 
     if (state.zHistory.length >= 5) {
