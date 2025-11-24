@@ -264,6 +264,61 @@ function checkCorrelationRisk(state, newSymbol, newSide, newSize) {
   };
 }
 
+function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown, upAsk, downAsk, asset, logger) {
+  if (minsLeft >= 2) {
+    return { safe: true, reason: "Not in danger zone" };
+  }
+  
+  const distBps = (Math.abs(currentPrice - startPrice) / startPrice) * 10000;
+  const minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
+  
+  if (distBps >= minSafeDist) {
+    return { safe: true, reason: `Far from strike: ${distBps.toFixed(1)}bps` };
+  }
+  
+  // In danger zone - apply strict rules
+  const priceIsAboveStrike = currentPrice > startPrice;
+  const absZ = Math.abs(z);
+  
+  // Calculate edge for both directions
+  const upEdge = upAsk ? pUp - upAsk : 0;
+  const downEdge = downAsk ? pDown - downAsk : 0;
+  
+  if (priceIsAboveStrike) {
+    // Price above strike - UP is safer, DOWN is dangerous
+    if (z > 0 && upEdge > 0.05) {
+      // Trading WITH direction + good edge = allow
+      logger.log(`✅ Basis OK: WITH direction (UP), edge=${(upEdge*100).toFixed(1)}%, dist=${distBps.toFixed(1)}bps`);
+      return { safe: true, reason: "Trading with direction" };
+    }
+    if (z < 0) {
+      // Trading AGAINST direction - need exceptional signal
+      if (absZ > 2.0 && downEdge > 0.15) {
+        logger.log(`⚠️  Basis override: Extreme signal (z=${z.toFixed(2)}, edge=${(downEdge*100).toFixed(1)}%)`);
+        return { safe: true, reason: "Extreme counter-signal" };
+      }
+      logger.log(`🚫 BASIS RISK: Against direction, insufficient signal (z=${z.toFixed(2)})`);
+      return { safe: false, reason: "Against direction in danger zone" };
+    }
+  } else {
+    // Price below strike - DOWN is safer, UP is dangerous
+    if (z < 0 && downEdge > 0.05) {
+      logger.log(`✅ Basis OK: WITH direction (DOWN), edge=${(downEdge*100).toFixed(1)}%, dist=${distBps.toFixed(1)}bps`);
+      return { safe: true, reason: "Trading with direction" };
+    }
+    if (z > 0) {
+      if (absZ > 2.0 && upEdge > 0.15) {
+        logger.log(`⚠️  Basis override: Extreme signal (z=${z.toFixed(2)}, edge=${(upEdge*100).toFixed(1)}%)`);
+        return { safe: true, reason: "Extreme counter-signal" };
+      }
+      logger.log(`🚫 BASIS RISK: Against direction, insufficient signal (z=${z.toFixed(2)})`);
+      return { safe: false, reason: "Against direction in danger zone" };
+    }
+  }
+  
+  return { safe: true, reason: "No clear signal" };
+}
+
 // ---------- UTILS ----------
 
 function current15mStartUnix(date = new Date()) {
@@ -641,14 +696,21 @@ async function execForAsset(asset, priceData) {
     });
 
     // 6) Decision Gating with Basis Risk Check
-    const zMaxTimeBased = dynamicZMax(minsLeft);
-    const absZ = Math.abs(z);
+    const basisCheck = checkBasisRiskHybrid(
+      currentPrice, 
+      startPrice, 
+      minsLeft, 
+      z, 
+      pUp, 
+      pDown, 
+      upAsk, 
+      downAsk, 
+      asset, 
+      logger
+    );
 
-    const distBps = (Math.abs(currentPrice - startPrice) / startPrice) * 10000;
-    const minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
-
-    if (minsLeft < 2 && distBps < minSafeDist) {
-      logger.log(`🚫 BASIS RISK: Price too close to strike. Dist: ${distBps.toFixed(1)}bps < Safe: ${minSafeDist}bps. Skipping.`);
+    if (!basisCheck.safe) {
+      logger.log(`Skipping trade: ${basisCheck.reason}`);
       return;
     }
 
@@ -656,6 +718,9 @@ async function execForAsset(asset, priceData) {
     let zMinEarlyDynamic = Z_MIN_EARLY / regimeScalar;
     let zMinLateDynamic  = Z_MIN_LATE / regimeScalar;
     let zHugeDynamic     = Z_HUGE / regimeScalar;
+    const zMaxTimeBased  = dynamicZMax(minsLeft);
+    const absZ           = Math.abs(z);
+
 
     // Additional low-vol adjustment (if raw scalar < 1.0, we're in calm market)
     if (rawRegimeScalar < 1.1) {
