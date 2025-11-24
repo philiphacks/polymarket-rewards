@@ -784,18 +784,39 @@ async function execForAsset(asset, priceData) {
     if (state.zHistory.length >= 5) {
       const recentZ = state.zHistory.slice(-5);
       const zChange = recentZ[0].z - recentZ[recentZ.length - 1].z;
-      
+      const zDecayThreshold = minsLeft < 3 ? 0.25 : 0.4;
+
       // Check UP positions (z falling)
-      if (sharesUp > 0 && zChange > 0.4) {
+      if (sharesUp > 0 && zChange > zDecayThreshold) {
         logger.log(`⛔ RAPID SIGNAL DECAY (UP): z fell ${zChange.toFixed(2)} in 30s`);
         return;
       }
       
       // Check DOWN positions (z rising)
-      if (sharesDown > 0 && zChange < -0.4) {
+      if (sharesDown > 0 && zChange < -zDecayThreshold) {
         logger.log(`⛔ RAPID SIGNAL DECAY (DOWN): z rose ${Math.abs(zChange).toFixed(2)} in 30s`);
         return;
       }
+    }
+
+    if (!state.weakSignalCount) state.weakSignalCount = 0;
+
+    if (sharesUp > 0 && z < 0.8) {
+      state.weakSignalCount++;
+      
+      if (state.weakSignalCount > 3) {
+        logger.log(`⛔ Signal been weak for ${state.weakSignalCount} ticks, stopping`);
+        return;
+      }
+    } else if (sharesDown > 0 && z > -0.8) {
+      state.weakSignalCount++;
+      
+      if (state.weakSignalCount > 3) {
+        logger.log(`⛔ Signal been weak for ${state.weakSignalCount} ticks, stopping`);
+        return;
+      }
+    } else {
+      state.weakSignalCount = 0;
     }
 
     // 6) Decision Gating with Basis Risk Check
