@@ -80,11 +80,10 @@ const MIN_EDGE_LATE  = 0.03;
 const ENABLE_EARLY_TRADING = true; // Toggle this to enable/disable early trading
 const Z_MIN_VERY_EARLY = 1.8; // Stricter z-threshold for 5+ min window (was 1.5)
 const Z_MIN_MID_EARLY = 1.4;  // Medium threshold for 3-5 min window (was 1.2)
-// Note: Z_MIN_LATE = 0.7 for <3 mins (defined below)
 
-// Base z-thresholds (Now INVERTED - will be divided by regime scalar)
 const Z_MIN_EARLY = 1.0;
-const Z_MIN_LATE  = 0.7;
+const Z_MIN_LATE  = 0.8;
+const Z_MIN_VERY_LATE = 0.7;
 const MAX_SHARES_WEAK_SIGNAL = 70;
 
 // Regime scalar bounds (prevent extreme adjustments)
@@ -798,6 +797,7 @@ async function execForAsset(asset, priceData) {
       }
     }
 
+    // Method 1: Consecutive (fast response)
     if (!state.weakSignalCount) state.weakSignalCount = 0;
 
     if (sharesUp > 0 && z > 0 && z < 0.8) {
@@ -819,6 +819,21 @@ async function execForAsset(asset, priceData) {
     } else {
       // Signal is either strong or position is hedging
       state.weakSignalCount = 0;
+    }
+
+    // Method 2: Ratio (robust against oscillation)
+    if (!state.weakSignalHistory) state.weakSignalHistory = [];
+
+    const isWeak = (sharesUp > 0 && z > 0 && z < 0.8) ||  (sharesDown > 0 && z < 0 && z > -0.8);
+    state.weakSignalHistory.push(isWeak);
+    if (state.weakSignalHistory.length > 10) {
+      state.weakSignalHistory.shift();
+    }
+
+    const weakCount = state.weakSignalHistory.filter(x => x).length;
+    if (weakCount >= 6) {
+      logger.log(`⛔ Signal weak for ${weakCount}/10 ticks`);
+      return;
     }
 
     // 6) Decision Gating with Basis Risk Check
