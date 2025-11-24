@@ -7,3 +7,4 @@ btc_sigma_1m.json
 *.csv
 .DS_Store
 *.jsonl
+files/
