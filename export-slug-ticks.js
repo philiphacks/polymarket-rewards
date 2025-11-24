@@ -17,7 +17,7 @@ import readline from "readline";
 
 const targetSlug = process.argv[2];
 if (!targetSlug) {
-  console.error("Usage: node export_slug_ticks.mjs <slug> [outFile]");
+  console.error("Usage: node export_slug_ticks.js <slug> [outFile]");
   process.exit(1);
 }
 

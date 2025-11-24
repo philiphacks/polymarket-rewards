@@ -85,6 +85,7 @@ const Z_MIN_MID_EARLY = 1.4;  // Medium threshold for 3-5 min window (was 1.2)
 // Base z-thresholds (Now INVERTED - will be divided by regime scalar)
 const Z_MIN_EARLY = 1.0;
 const Z_MIN_LATE  = 0.7;
+const MAX_SHARES_WEAK_SIGNAL = 70;
 
 // Regime scalar bounds (prevent extreme adjustments)
 const REGIME_SCALAR_MIN = 0.7; // Don't make thresholds too high in low vol
@@ -191,7 +192,7 @@ function estimateDrift(symbol, windowMinutes = 60) {
 function kellySize(prob, price, maxShares, fraction = 0.15) {
   // Edge cases
   if (price >= 0.99 || price <= 0.01) return 10; // fallback for extreme prices
-  if (prob <= price) return 10; // no edge, minimum bet
+  if (prob <= price) return 0; // no edge, minimum bet
   
   // Kelly formula for binary outcomes: (p - price) / (1 - price)
   // Where you pay 'price' and get $1 if you win
@@ -264,7 +265,22 @@ function checkCorrelationRisk(state, newSymbol, newSide, newSize) {
   };
 }
 
-function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown, upAsk, downAsk, asset, logger) {
+function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown, upAsk, downAsk, asset, logger, sharesUp = 0, sharesDown = 0) {
+  if (minsLeft > 5) {
+    const distFromStrike = (currentPrice - startPrice) / startPrice * 10000; // in bps
+    
+    // If price moved significantly against existing position, STOP
+    if (distFromStrike < -20 && sharesUp > 0) {
+      logger.log(`⛔ EARLY STOP: Price ${distFromStrike.toFixed(1)}bps below strike, holding ${sharesUp} UP`);
+      return { safe: false, reason: "Price crossed strike early (UP position)" };
+    }
+    
+    if (distFromStrike > 20 && sharesDown > 0) {
+      logger.log(`⛔ EARLY STOP: Price ${distFromStrike.toFixed(1)}bps above strike, holding ${sharesDown} DOWN`);
+      return { safe: false, reason: "Price crossed strike early (DOWN position)" };
+    }
+  }
+
   if (minsLeft >= 2) {
     return { safe: true, reason: "Not in danger zone" };
   }
@@ -544,6 +560,7 @@ function ensureState(asset) {
       resetting: false,
       cpData: null,
       marketMeta: null,
+      zHistory: []
     };
     console.log(`[${asset.symbol}] Reset state for ${slug}`);
   }
@@ -649,7 +666,10 @@ async function execForAsset(asset, priceData) {
     
     // Include drift in z-score calculation
     const z = (currentPrice - startPrice - drift * minsLeft) / sigmaT;
-    
+    if (!state.zHistory) state.zHistory = [];
+    state.zHistory.push({ z, ts: Date.now() });
+    state.zHistory = state.zHistory.filter(h => Date.now() - h.ts < 30000);
+
     // Use normal distribution (well-calibrated for our use case)
     const pUp = normCdf(z);
     const pDown = 1 - pUp;
@@ -685,6 +705,33 @@ async function execForAsset(asset, priceData) {
     if (sharesUp > 0 && pUp < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding UP but pUp=${pUp.toFixed(4)}`);
     if (sharesDown > 0 && pDown < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding DOWN but pDown=${pDown.toFixed(4)}`);
 
+    if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
+      logger.log(`⛔ Weak signal position limit: ${sharesUp} shares with z=${z.toFixed(2)}`);
+      return;
+    }
+
+    if (z < 0 && z > -0.8 && sharesDown >= MAX_SHARES_WEAK_SIGNAL) {
+      logger.log(`⛔ Weak signal position limit: ${sharesDown} shares with z=${z.toFixed(2)}`);
+      return;
+    }
+
+    if (state.zHistory.length >= 5) {
+      const recentZ = state.zHistory.slice(-5);
+      const zChange = recentZ[0].z - recentZ[recentZ.length - 1].z;
+      
+      // Check UP positions (z falling)
+      if (sharesUp > 0 && zChange > 0.4) {
+        logger.log(`⛔ RAPID SIGNAL DECAY (UP): z fell ${zChange.toFixed(2)} in 30s`);
+        return;
+      }
+      
+      // Check DOWN positions (z rising)
+      if (sharesDown > 0 && zChange < -0.4) {
+        logger.log(`⛔ RAPID SIGNAL DECAY (DOWN): z rose ${Math.abs(zChange).toFixed(2)} in 30s`);
+        return;
+      }
+    }
+
     // Log Snapshot
     logTickSnapshot({
       ts: Date.now(), symbol: asset.symbol, slug, minsLeft,
@@ -696,9 +743,9 @@ async function execForAsset(asset, priceData) {
     });
 
     // FIXED: Z-thresholds now DIVIDED by regime scalar with proper clamping
-    let zMinEarlyDynamic = Z_MIN_EARLY / regimeScalar;
-    let zMinLateDynamic  = Z_MIN_LATE / regimeScalar;
-    let zHugeDynamic     = Z_HUGE / regimeScalar;
+    let zMinEarlyDynamic = Z_MIN_EARLY * regimeScalar;
+    let zMinLateDynamic  = Z_MIN_LATE * regimeScalar;
+    let zHugeDynamic     = Z_HUGE * regimeScalar;
     const zMaxTimeBased  = dynamicZMax(minsLeft);
     const absZ           = Math.abs(z);
 
@@ -762,7 +809,9 @@ async function execForAsset(asset, priceData) {
       upAsk,
       downAsk,
       asset,
-      logger
+      logger,
+      sharesUp,
+      sharesDown
     );
 
     if (!basisCheck.safe) {
