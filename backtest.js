@@ -12,7 +12,7 @@ const CONFIG = {
   // NEW: Advanced features
   USE_DRIFT: true,           // Toggle drift adjustment
   REGIME_INVERSION: false,    // Toggle inverted regime logic
-  KELLY_SIZING: true,        // Use Kelly vs fixed size
+  KELLY_SIZING: false,        // Use Kelly vs fixed size
   KELLY_FRACTION: 0.15,       // Kelly fraction (0.25 = quarter Kelly, 0.15 = more conservative)
   STANDARD_KELLY_SIZE: 100,   // Always try to buy 100 shares
   USE_CORRELATION_CHECK: true, // Toggle correlation risk check
@@ -46,7 +46,8 @@ const LOG_FILES = [
   "ticks-20251120.jsonl",
   "ticks-20251121.jsonl",
   "ticks-20251122.jsonl",
-  "ticks-20251123.jsonl"
+  "ticks-20251123.jsonl",
+  "ticks-20251124.jsonl",
 ];
 const allTrades = [];
 
@@ -272,7 +273,7 @@ async function runBacktest() {
       const modelProbForTrade = z > 0 ? pUp : pDown;
       const priceForTrade = z > 0 ? upAsk : downAsk;
 
-      let intendedSize = CONFIG.STANDARD_KELLY_SIZE;
+      let intendedSize = CONFIG.STANDARD_KELLY_SIZE * 5;
       if (CONFIG.KELLY_SIZING && upAsk && downAsk && priceForTrade) {
         intendedSize = kellySize(
           modelProbForTrade,
