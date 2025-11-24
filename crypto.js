@@ -715,23 +715,6 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    if (state.zHistory.length >= 5) {
-      const recentZ = state.zHistory.slice(-5);
-      const zChange = recentZ[0].z - recentZ[recentZ.length - 1].z;
-      
-      // Check UP positions (z falling)
-      if (sharesUp > 0 && zChange > 0.4) {
-        logger.log(`⛔ RAPID SIGNAL DECAY (UP): z fell ${zChange.toFixed(2)} in 30s`);
-        return;
-      }
-      
-      // Check DOWN positions (z rising)
-      if (sharesDown > 0 && zChange < -0.4) {
-        logger.log(`⛔ RAPID SIGNAL DECAY (DOWN): z rose ${Math.abs(zChange).toFixed(2)} in 30s`);
-        return;
-      }
-    }
-
     // Log Snapshot
     logTickSnapshot({
       ts: Date.now(), symbol: asset.symbol, slug, minsLeft,
@@ -794,6 +777,23 @@ async function execForAsset(asset, priceData) {
         const evUp = upAsk ? pUp - upAsk : 0;
         const evDown = downAsk ? pDown - downAsk : 0;
         logger.log(`Skip: |z|=${absZ.toFixed(3)} < Min=${zMinLateDynamic.toFixed(2)} | EV Up/Down: ${evUp.toFixed(3)}/${evDown.toFixed(3)}`);
+        return;
+      }
+    }
+
+    if (state.zHistory.length >= 5) {
+      const recentZ = state.zHistory.slice(-5);
+      const zChange = recentZ[0].z - recentZ[recentZ.length - 1].z;
+      
+      // Check UP positions (z falling)
+      if (sharesUp > 0 && zChange > 0.4) {
+        logger.log(`⛔ RAPID SIGNAL DECAY (UP): z fell ${zChange.toFixed(2)} in 30s`);
+        return;
+      }
+      
+      // Check DOWN positions (z rising)
+      if (sharesDown > 0 && zChange < -0.4) {
+        logger.log(`⛔ RAPID SIGNAL DECAY (DOWN): z rose ${Math.abs(zChange).toFixed(2)} in 30s`);
         return;
       }
     }
@@ -882,7 +882,7 @@ async function execForAsset(asset, priceData) {
 
       let lateSide = null, sideProb = 0, sideAsk = 0;
 
-      if (pUp >= pReq && z > zMinLateDynamic) { 
+      if (pUp >= pReq && z > Math.max(zMinLateDynamic, 0.3)) {
         lateSide = "UP"; 
         sideProb = pUp; 
         sideAsk = upAsk || 0.99; 
