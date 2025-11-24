@@ -800,21 +800,24 @@ async function execForAsset(asset, priceData) {
 
     if (!state.weakSignalCount) state.weakSignalCount = 0;
 
-    if (sharesUp > 0 && z < 0.8) {
+    if (sharesUp > 0 && z > 0 && z < 0.8) {
+      // UP position with weak UP signal
       state.weakSignalCount++;
       
       if (state.weakSignalCount > 3) {
-        logger.log(`⛔ Signal been weak for ${state.weakSignalCount} ticks, stopping`);
+        logger.log(`⛔ UP signal weak for ${state.weakSignalCount} ticks, stopping`);
         return;
       }
-    } else if (sharesDown > 0 && z > -0.8) {
+    } else if (sharesDown > 0 && z < 0 && z > -0.8) {
+      // DOWN position with weak DOWN signal
       state.weakSignalCount++;
       
       if (state.weakSignalCount > 3) {
-        logger.log(`⛔ Signal been weak for ${state.weakSignalCount} ticks, stopping`);
+        logger.log(`⛔ DOWN signal weak for ${state.weakSignalCount} ticks, stopping`);
         return;
       }
     } else {
+      // Signal is either strong or position is hedging
       state.weakSignalCount = 0;
     }
 
