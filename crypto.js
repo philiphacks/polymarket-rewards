@@ -435,6 +435,11 @@ function isInSlamWindow(date = new Date()) {
   return totalMins >= 14 * 60 + 45 && totalMins < 15 * 60;
 }
 
+function isUSTradingHours(date = new Date()) {
+  const totalMins = date.getUTCHours() * 60 + date.getUTCMinutes();
+  return totalMins >= 12 * 60 + 45 && totalMins < 19 * 60 + 45;
+}
+
 // Logging
 function logTickSnapshot(snapshot) {
   try {
@@ -742,8 +747,7 @@ async function execForAsset(asset, priceData) {
 
     // Gating Log - UPDATED WITH EARLY TRADING LOGIC
     let effectiveZMin;
-
-    if (ENABLE_EARLY_TRADING) {
+    if (ENABLE_EARLY_TRADING && !isUSTradingHours()) {
       // Graduated thresholds based on time
       if (minsLeft > 5) {
         effectiveZMin = Z_MIN_VERY_EARLY; // 1.8
@@ -757,7 +761,7 @@ async function execForAsset(asset, priceData) {
     } else {
       // Early trading disabled
       if (minsLeft > 5) {
-        logger.log(`Skip: Early trading disabled (${minsLeft.toFixed(1)} mins left)`);
+        logger.log(`Skip (${minsLeft.toFixed(1)} mins left): ${isUSTradingHours() ? 'US hours' : 'Early trading disabled'}`);
         return;
       }
       if (minsLeft > 3) {
