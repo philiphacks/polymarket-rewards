@@ -754,7 +754,7 @@ async function execForAsset(asset, priceData) {
       } else if (minsLeft > 3) {
         effectiveZMin = 1.5 * regimeScalar; // Strict for mid window
       } else if (minsLeft > 2) {
-        effectiveZMin = 1.0 * regimeScalar; // Normal
+        effectiveZMin = 1.5 * regimeScalar; // Stricter, used to be 1.0
       } else {
         effectiveZMin = 0.9 * regimeScalar; // Late
       }
