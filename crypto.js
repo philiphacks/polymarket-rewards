@@ -1065,7 +1065,7 @@ async function execForAsset(asset, priceData) {
 
           // CRITICAL: Check if signal flipped sign FIRST
           const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
-          
+
           if (!sameSign) {
             // Signal reversed - always block regardless of magnitude
             logger.log(`⛔ LATE_LAYER CAP: Signal reversed ${entrySignalForCap.toFixed(2)} → ${currentSignalForCap.toFixed(2)}`);
