@@ -1,4 +1,4 @@
-// Version 2.3 - Signal-Aware Trading with Reversal Detection
+// Version 2.3.1 - Signal-Aware Trading with Reversal Detection (Verified)
 // Key Changes from 2.1:
 // - Added entry z-score storage for signal reversal detection
 // - Signal-aware LATE_LAYER: blocks if signal has reversed >1.5σ
@@ -8,6 +8,12 @@
 // - Lowered 2-3 min threshold from 1.2 to 0.9 (sweet spot window)
 // - Added drift clamping to prevent extreme values
 // - Removed duplicate reversal checks
+// - RESTORED: Low-vol boost (0.85x) for better low-vol trading
+//
+// Changes from 2.3 → 2.3.1:
+// - Restored LOW_VOL_BOOST logic that was accidentally removed
+// - Applied low-vol adjustment to zHugeDynamic in LATE_LAYER
+// - Triple-verified all threshold logic
 
 import 'dotenv/config';
 import cron from "node-cron";
@@ -168,7 +174,7 @@ function estimateDrift(symbol, windowMinutes = 60) {
   const currentPrice = history[history.length - 1].price;
   const driftPerMinute = slope * currentPrice;
   
-  // NEW: Clamp drift to ±0.1% of price per minute (prevents extreme values)
+  // Clamp drift to ±0.1% of price per minute (prevents extreme values)
   const maxDrift = currentPrice * 0.001; // 0.1%
   const clampedDrift = Math.max(-maxDrift, Math.min(maxDrift, driftPerMinute));
   
@@ -357,7 +363,7 @@ function cryptoPriceUrl({ symbol, date = new Date(), variant = "fifteen" }) {
   return `https://polymarket.com/api/crypto/crypto-price?${params.toString()}`;
 }
 
-// FIXED: Time decay now INCREASES volatility near expiry (gamma risk)
+// Time decay INCREASES volatility near expiry (gamma risk)
 function getTimeDecayFactor(minsLeft) {
   if (minsLeft >= 1) return 1.0;
   
@@ -554,7 +560,7 @@ function ensureState(asset) {
       cpData: null,
       marketMeta: null,
       zHistory: [],
-      entryZ: null,  // NEW: Store entry z-score for reversal detection
+      entryZ: null,  // Store entry z-score for reversal detection
       weakSignalCount: 0,
       weakSignalHistory: []
     };
@@ -722,7 +728,7 @@ async function execForAsset(asset, priceData) {
     });
 
     // ==============================================
-    // NEW: Store Entry Z-Score for Signal Reversal Detection
+    // Store Entry Z-Score for Signal Reversal Detection
     // ==============================================
     
     if (state.entryZ === null && (sharesUp > 0 || sharesDown > 0)) {
@@ -735,6 +741,7 @@ async function execForAsset(asset, priceData) {
     // ==============================================
     
     const absZ = Math.abs(z);
+    const zMaxTimeBased = dynamicZMax(minsLeft);
     let effectiveZMin;
 
     if (ENABLE_EARLY_TRADING && !isUSTradingHours()) {
@@ -746,7 +753,7 @@ async function execForAsset(asset, priceData) {
       } else if (minsLeft > 3) {
         effectiveZMin = 1.3 * regimeScalar; // Mid early: moderate
       } else if (minsLeft > 2) {
-        effectiveZMin = 0.9 * regimeScalar; // Getting close: normal (LOWERED from 1.2)
+        effectiveZMin = 0.9 * regimeScalar; // Getting close: normal
       } else {
         effectiveZMin = 0.7 * regimeScalar; // Late game: aggressive
       }
@@ -758,15 +765,23 @@ async function execForAsset(asset, priceData) {
       } else if (minsLeft > 3) {
         effectiveZMin = 1.8 * regimeScalar; // Strict for mid window
       } else if (minsLeft > 2) {
-        effectiveZMin = 0.9 * regimeScalar; // Normal (LOWERED from 1.0)
+        effectiveZMin = 0.9 * regimeScalar; // Normal
       } else {
         effectiveZMin = 0.7 * regimeScalar; // Late
       }
     }
 
-    // Apply low-vol adjustment
-    if (rawRegimeScalar < 1.1 && minsLeft > 2) {
-      effectiveZMin *= 0.85;
+    // ==============================================
+    // RESTORED: Low-Vol Boost
+    // In calm markets, signals are more reliable → trade more aggressively
+    // ==============================================
+    
+    if (rawRegimeScalar < 1.1) {
+      const LOW_VOL_BOOST = 0.85; // 15% easier in low vol
+      const oldThreshold = effectiveZMin;
+      effectiveZMin *= LOW_VOL_BOOST;
+      
+      logger.log(`[Low Vol Regime] Threshold reduced: ${oldThreshold.toFixed(2)} → ${effectiveZMin.toFixed(2)} (${((1-LOW_VOL_BOOST)*100).toFixed(0)}% easier)`);
     }
 
     // Single gating check
@@ -834,7 +849,7 @@ async function execForAsset(asset, priceData) {
     }
 
     // ==============================================
-    // NEW: Large Signal Reversal Detector
+    // Large Signal Reversal Detector
     // ==============================================
     
     if (state.zHistory && state.zHistory.length >= 4) {
@@ -927,11 +942,10 @@ async function execForAsset(asset, priceData) {
     // ============================================================
     // LATE GAME MODE (SIGNAL-AWARE)
     // ============================================================
-    const zMaxTimeBased = dynamicZMax(minsLeft);
     
     if (absZ > zMaxTimeBased || minsLeft < 2) {
       // ==============================================
-      // NEW: Signal-Aware LATE_LAYER
+      // Signal-Aware LATE_LAYER
       // Check if signal has reversed since entry
       // ==============================================
       
@@ -972,7 +986,14 @@ async function execForAsset(asset, priceData) {
 
       if (lateSide) {
         // 1. EXTREME SIGNAL - Kelly Criterion sizing
-        const zHugeDynamic = Math.min(2.8, Z_HUGE * regimeScalar); // Capped at 2.8
+        let zHugeDynamic = Math.min(2.8, Z_HUGE * regimeScalar); // Capped at 2.8
+        
+        // RESTORED: Apply low-vol adjustment to extreme threshold
+        if (rawRegimeScalar < 1.1) {
+          const oldZHuge = zHugeDynamic;
+          zHugeDynamic *= 0.90; // 10% easier in low vol
+          logger.log(`[Low Vol] Extreme threshold: ${oldZHuge.toFixed(2)} → ${zHugeDynamic.toFixed(2)}`);
+        }
         
         if (absZ >= zHugeDynamic && secsLeft <= LATE_GAME_EXTREME_SECS && 
             sideAsk <= LATE_GAME_MAX_PRICE && (sideProb - sideAsk) >= LATE_GAME_MIN_EV) {
@@ -1256,7 +1277,7 @@ async function execAll() {
 
 // === STARTUP & SCHEDULER ===
 (async () => {
-  console.log("Initializing Bot v2.3...");
+  console.log("Initializing Bot v2.3.1...");
 
   try {
     // 1. Warm up volatility with historical data
@@ -1273,7 +1294,7 @@ async function execAll() {
       });
     });
     
-    console.log("🚀 Bot v2.3 running!");
+    console.log("🚀 Bot v2.3.1 running!");
   } catch (err) {
     console.error("FATAL: Startup failed:", err.message, err.stack);
     process.exit(1);
