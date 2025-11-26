@@ -788,21 +788,21 @@ async function execForAsset(asset, priceData) {
     // ==============================================
     // NEW: Regime Detection
     // ==============================================
-    
+
     const regimeResult = detectRegime(state.priceHistory, currentPrice);
-    
+
     // Apply manual override if set
     let detectedRegime = MANUAL_REGIME_OVERRIDE || regimeResult.regime;
-    
+
     // Log regime changes
     if (detectedRegime !== state.currentRegime) {
       logger.log(`🔄 REGIME CHANGE: ${state.currentRegime} → ${detectedRegime} (ADX=${regimeResult.adx?.toFixed(1) || 'N/A'}, ATR=${regimeResult.atrPct?.toFixed(2) || 'N/A'}%)`);
       state.currentRegime = detectedRegime;
     }
-    
+
     const regimeConfig = REGIME_THRESHOLDS[state.currentRegime];
     const regimeMultiplier = regimeConfig.multiplier;
-    
+
     logger.log(`📊 Regime: ${state.currentRegime} (${regimeMultiplier}x) - ${regimeConfig.description}`);
     if (regimeResult.adx !== null) {
       logger.log(`   ADX: ${regimeResult.adx.toFixed(1)} | ATR: ${regimeResult.atrPct.toFixed(2)}% | Confidence: ${(regimeResult.confidence * 100).toFixed(0)}%`);
@@ -811,16 +811,16 @@ async function execForAsset(asset, priceData) {
     // 4) Volatility & Drift
     let rawSigmaPerMin = VolatilityManager.getRealizedVolatility(asset.symbol, currentPrice);
     const drift = estimateDrift(asset.symbol, 60);
-    
+
     const effectiveSigma = rawSigmaPerMin * getTimeDecayFactor(minsLeft);
     const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
-    
+
     // Regime scalar clamped to prevent extreme adjustments
     const rawRegimeScalar = Math.sqrt(volRatio);
     const regimeScalar = Math.max(REGIME_SCALAR_MIN, Math.min(REGIME_SCALAR_MAX, rawRegimeScalar));
 
     const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
-    
+
     // Include drift in z-score calculation
     const z = (currentPrice - startPrice - drift * minsLeft) / sigmaT;
     if (!state.zHistory) state.zHistory = [];
