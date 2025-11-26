@@ -926,7 +926,7 @@ async function monitorAndCancelOrder(orderID, asset, side, size, logger) {
 const stateBySymbol = {};
 const executionLock = {}; // Prevent race conditions
 
-function ensureState(asset) {
+function ensureState(asset, logger) {
   for (const [orderID, data] of pendingOrders.entries()) {
     logger.warn(`🧹 Cleaning stale order: ${orderID} (${age}s old)`);
     pendingOrders.delete(orderID);
@@ -966,7 +966,7 @@ async function execForAsset(asset, priceData) {
   executionLock[asset.symbol] = true;
 
   try {
-    const state = ensureState(asset);
+    const state = ensureState(asset, logger);
     if (state.resetting) return;
     const { slug, cryptoPriceUrl, gammaUrl } = state;
 
