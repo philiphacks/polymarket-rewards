@@ -1202,7 +1202,7 @@ async function execForAsset(asset, priceData) {
         const reversalMagnitude = Math.abs(newZ - oldZ);
         
         // Large reversal (>1σ)?
-        if (reversalMagnitude > 1.0) {
+        if (reversalMagnitude > EXIT_REVERSAL_THRESHOLD) {
           logger.log(`⚠️  SIGNAL REVERSAL: z=${oldZ.toFixed(2)} → ${newZ.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
           logger.log(`⛔ EXIT: Large signal reversal, stopping all trading`);
           return;
@@ -1295,8 +1295,8 @@ async function execForAsset(asset, priceData) {
 
       const reversalMagnitude = Math.abs(currentSignal - entrySignal);
       
-      // BUG FIX #1: Lowered threshold from 1.5σ to 1.0σ to match main detector
-      const largeReversal = reversalMagnitude > 1.0;
+      // BUG FIX #1: Lowered threshold from 1.5σ to 0.8σ to match main detector
+      const largeReversal = reversalMagnitude > EXIT_REVERSAL_THRESHOLD;
 
       if (signalFlipped && largeReversal) {
         logger.log(`⛔ LATE_LAYER BLOCKED: Signal reversed ${entrySignal.toFixed(2)} → ${currentSignal.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
