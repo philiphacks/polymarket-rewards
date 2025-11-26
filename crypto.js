@@ -1508,10 +1508,10 @@ async function execForAsset(asset, priceData) {
           }
 
           // Signal still strong but position large, cap at 400
-          if (totalShares >= 400) {
-            logger.log(`⛔ LATE_LAYER CAP: Max position (${totalShares} shares)`);
-            return;
-          }
+          // if (totalShares >= 400) {
+          //   logger.log(`⛔ LATE_LAYER CAP: Max position (${totalShares} shares)`);
+          //   return;
+          // }
         }
 
         // 2. HYBRID LAYERED MODEL
