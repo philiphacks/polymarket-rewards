@@ -957,7 +957,7 @@ async function execForAsset(asset, priceData) {
                             && Math.sign(currentSignal) !== 0;
 
       const reversalMagnitude = Math.abs(currentSignal - entrySignal);
-      const largeReversal = reversalMagnitude > 1.5;
+      const largeReversal = reversalMagnitude > 1.0;
 
       if (signalFlipped && largeReversal) {
         logger.log(`⛔ LATE_LAYER BLOCKED: Signal reversed ${entrySignal.toFixed(2)} → ${currentSignal.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
