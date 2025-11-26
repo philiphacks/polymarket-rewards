@@ -759,7 +759,7 @@ async function execForAsset(asset, priceData) {
       }
     } else {
       // US hours or early trading disabled
-      if (minsLeft > 4) {
+      if (minsLeft > 3.5) {
         logger.log(`Skip (${minsLeft.toFixed(1)} mins left): ${isUSTradingHours() ? 'US hours' : 'Early trading disabled'}`);
         return;
       } else if (minsLeft > 3) {
