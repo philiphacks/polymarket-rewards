@@ -1047,13 +1047,6 @@ async function execForAsset(asset, priceData) {
         logger.warn(`⚠️  Blocking new entries to prevent adding to losing position`);
         return; // Don't add to position if exit failed
       }
-    } else {
-      const { tokenIds } = state.marketMeta;
-      await getActualPositions(
-        FUNDER, // The funder address from config
-        tokenIds,
-        logger
-      );
     }
 
     // Continue with normal trading logic if no exit needed...
