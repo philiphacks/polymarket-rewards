@@ -927,11 +927,6 @@ const stateBySymbol = {};
 const executionLock = {}; // Prevent race conditions
 
 function ensureState(asset, logger) {
-  for (const [orderID, data] of pendingOrders.entries()) {
-    logger.warn(`🧹 Cleaning stale order: ${orderID}`);
-    pendingOrders.delete(orderID);
-  }
-
   if (!stateBySymbol[asset.symbol]) {
     const slug = crypto15mSlug(asset.slugPrefix);
     stateBySymbol[asset.symbol] = {
@@ -950,6 +945,11 @@ function ensureState(asset, logger) {
       weakSignalHistory: []
     };
     console.log(`[${asset.symbol}] Reset state for ${slug}`);
+
+    for (const [orderID, data] of pendingOrders.entries()) {
+      logger.warn(`🧹 Cleaning stale order: ${orderID}`);
+      pendingOrders.delete(orderID);
+    }
   }
   return stateBySymbol[asset.symbol];
 }
