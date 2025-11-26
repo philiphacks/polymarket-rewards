@@ -757,7 +757,7 @@ async function execForAsset(asset, priceData) {
       } else if (minsLeft > 3) {
         effectiveZMin = Z_MIN_MID_EARLY; // 1.4
       } else if (minsLeft > 2) {
-        effectiveZMin = 1.2 * regimeScalar; // 1.2 (NEW! Raised from 0.7)
+        effectiveZMin = 1.0 * regimeScalar; // 1.0 (NEW! Raised from 0.7)
       } else {
         effectiveZMin = Z_MIN_LATE * regimeScalar; // 0.7
       }
@@ -846,6 +846,14 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
+    if (!state.entryZ) {
+      state.entryZ = null;
+    }
+    if (state.entryZ === null && (sharesUp > 0 || sharesDown > 0)) {
+      state.entryZ = z;
+      logger.log(`[Entry Signal] Stored z=${z.toFixed(2)}`);
+    }
+
     // 6) Decision Gating with Basis Risk Check
     const basisCheck = checkBasisRiskHybrid(
       currentPrice,
@@ -923,10 +931,48 @@ async function execForAsset(asset, priceData) {
       return c.ev > required;
     });
 
+    if (state.zHistory && state.zHistory.length >= 4) {
+      const recent = state.zHistory.slice(-4);
+      const oldZ = recent[0].z;
+      const newZ = recent[recent.length - 1].z;
+      
+      const oldSign = Math.sign(oldZ);
+      const newSign = Math.sign(newZ);
+      
+      // Signal flipped sign?
+      if (oldSign !== newSign && oldSign !== 0 && newSign !== 0) {
+        const reversalMagnitude = Math.abs(newZ - oldZ);
+        
+        // Large reversal (>1.5σ)?
+        if (reversalMagnitude > 1.5) {
+          logger.log(`⚠️  SIGNAL REVERSAL DETECTED: z=${oldZ.toFixed(2)} → ${newZ.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
+          logger.log(`⛔ EXIT: Large signal reversal, stopping all trading`);
+          return;
+        }
+      }
+    }
+
     // ============================================================
     // LATE GAME MODE
     // ============================================================
-    if (absZ > zMaxTimeBased || (minsLeft < 2 && minsLeft > 0.001)) {
+    if (absZ > zMaxTimeBased || minsLeft < 2) {
+      const entrySignal = state.entryZ || z;
+      const currentSignal = z;
+
+      // Check if signal has flipped sign
+      const signalFlipped = Math.sign(entrySignal) !== Math.sign(currentSignal) 
+                            && Math.sign(entrySignal) !== 0 
+                            && Math.sign(currentSignal) !== 0;
+
+      // Check if reversal is large (>1.5 standard deviations)
+      const reversalMagnitude = Math.abs(currentSignal - entrySignal);
+      const largeReversal = reversalMagnitude > 1.5;
+
+      if (signalFlipped && largeReversal) {
+        logger.log(`⛔ LATE_LAYER BLOCKED: Signal reversed ${entrySignal.toFixed(2)} → ${currentSignal.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
+        return;
+      }
+
       const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
       const secsLeft = minsLeft * 60;
       const pReq = requiredLateProb(secsLeft);
