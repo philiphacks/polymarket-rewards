@@ -78,7 +78,8 @@ const MIN_EDGE_LATE  = 0.03;
 
 // EARLY TRADING CONFIG (5-15 mins left)
 const ENABLE_EARLY_TRADING = true; // Toggle this to enable/disable early trading
-const Z_MIN_VERY_EARLY = 1.8; // Stricter z-threshold for 5+ min window (was 1.5)
+const Z_MIN_SUPER_EARLY = 2.0; // Stricter z-threshold for 8+ min window (was 1.8)
+const Z_MIN_VERY_EARLY = 1.8;
 const Z_MIN_MID_EARLY = 1.4;  // Medium threshold for 3-5 min window (was 1.2)
 
 const Z_MIN_EARLY = 1.0;
@@ -749,8 +750,10 @@ async function execForAsset(asset, priceData) {
     let effectiveZMin;
     if (ENABLE_EARLY_TRADING && !isUSTradingHours()) {
       // Graduated thresholds based on time
-      if (minsLeft > 5) {
-        effectiveZMin = Z_MIN_VERY_EARLY; // 1.8
+      if (minsLeft > 8) {
+        effectiveZMin = Z_MIN_SUPER_EARLY; // 2.0
+      } else if (minsLeft > 5) {
+        effectiveZMin = Z_MIN_VERY_EARLY;
       } else if (minsLeft > 3) {
         effectiveZMin = Z_MIN_MID_EARLY; // 1.4
       } else if (minsLeft > 2) {
@@ -867,7 +870,11 @@ async function execForAsset(asset, priceData) {
     // 7) Trade Logic - Directional (UPDATED FOR EARLY TRADING)
     // Use stricter z-threshold if we're in early window and early trading is enabled
     if (ENABLE_EARLY_TRADING && minsLeft > 5) {
-      effectiveZMin = Z_MIN_VERY_EARLY; // 1.8 for very early
+      if (minsLeft > 8) {
+        effectiveZMin = Z_MIN_SUPER_EARLY;
+      } else {
+        effectiveZMin = Z_MIN_VERY_EARLY; // 1.8 for very early
+      }
     } else {
       effectiveZMin = minsLeft > MINUTES_LEFT ? zMinEarlyDynamic : zMinLateDynamic;
     }
