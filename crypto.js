@@ -852,8 +852,8 @@ async function execForAsset(asset, priceData) {
     // Large Signal Reversal Detector
     // ==============================================
     
-    if (state.zHistory && state.zHistory.length >= 4) {
-      const recent = state.zHistory.slice(-4);
+    if (state.zHistory && state.zHistory.length >= 2) {
+      const recent = state.zHistory.slice(-2);
       const oldZ = recent[0].z;
       const newZ = recent[recent.length - 1].z;
       
@@ -864,8 +864,8 @@ async function execForAsset(asset, priceData) {
       if (oldSign !== newSign && oldSign !== 0 && newSign !== 0) {
         const reversalMagnitude = Math.abs(newZ - oldZ);
         
-        // Large reversal (>1.5σ)?
-        if (reversalMagnitude > 1.5) {
+        // Large reversal (>1σ)?
+        if (reversalMagnitude > 1.0) {
           logger.log(`⚠️  SIGNAL REVERSAL: z=${oldZ.toFixed(2)} → ${newZ.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
           logger.log(`⛔ EXIT: Large signal reversal, stopping all trading`);
           return;
