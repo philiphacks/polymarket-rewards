@@ -1058,6 +1058,10 @@ async function execForAsset(asset, priceData) {
           const entrySignalForCap = state.entryZ || z;
           const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
           const entryStrength = Math.abs(entrySignalForCap);
+          const absZ = Math.abs(currentSignalForCap);
+          const maxShares = absZ < 1.5 ? 200 :
+                            absZ < 2.0 ? 300 :
+                            absZ < 2.5 ? 400 : 600;
 
           // CRITICAL: Check if signal flipped sign FIRST
           const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
@@ -1078,8 +1082,8 @@ async function execForAsset(asset, priceData) {
           }
 
           // Signal still strong but position large, cap at 400
-          if (totalShares >= 400) {
-            logger.log(`⛔ LATE_LAYER CAP: Max position (${totalShares} shares)`);
+          if (totalShares >= maxShares) {
+            logger.log(`⛔ LATE_LAYER CAP: Max ${maxShares} shares (z=${absZ.toFixed(2)})`);
             return;
           }
         }
