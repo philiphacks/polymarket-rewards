@@ -1051,6 +1051,27 @@ async function execForAsset(asset, priceData) {
           }
         }
 
+        const totalShares = sharesUp + sharesDown;
+        if (totalShares >= 200) {
+          // Check if signal has weakened significantly
+          const entrySignal = state.entryZ || z;
+          const currentSignal = Math.abs(z);
+          const entryStrength = Math.abs(entrySignal);
+
+          // If signal weakened by >30%, cap at current position
+          const signalWeakening = (entryStrength - currentSignal) / entryStrength;
+          if (signalWeakening > 0.3) {
+            logger.log(`⛔ LATE_LAYER CAP: Signal weakened ${(signalWeakening*100).toFixed(0)}% (${totalShares} shares)`);
+            return;
+          }
+
+          // If signal still strong but position large, cap at 400
+          if (totalShares >= 400) {
+            logger.log(`⛔ LATE_LAYER CAP: Max position (${totalShares} shares)`);
+            return;
+          }
+        }
+
         // 2. HYBRID LAYERED MODEL
         const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
         const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
