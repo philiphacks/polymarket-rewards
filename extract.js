@@ -3,13 +3,7 @@ import readline from "readline";
 
 // ================= CONFIG =================
 const SLUGS_TO_EXTRACT = [
-  "btc-updown-15m-1764129600",
-  "btc-updown-15m-1764020700",
-  "eth-updown-15m-1764129600",
-  "eth-updown-15m-1764011700",
-  "sol-updown-15m-1764015300",
-  "sol-updown-15m-1764017100",
-  "eth-updown-15m-1764076500"
+  "xrp-updown-15m-1764153900"
 ];
 
 const ORDER_FILES = [
