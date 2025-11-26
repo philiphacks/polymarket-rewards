@@ -928,7 +928,7 @@ const executionLock = {}; // Prevent race conditions
 
 function ensureState(asset, logger) {
   for (const [orderID, data] of pendingOrders.entries()) {
-    logger.warn(`🧹 Cleaning stale order: ${orderID} (${age}s old)`);
+    logger.warn(`🧹 Cleaning stale order: ${orderID}`);
     pendingOrders.delete(orderID);
   }
 
