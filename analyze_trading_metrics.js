@@ -101,14 +101,18 @@ class TradeAnalyzer {
   }
 
   /**
-   * Match orders with their outcomes from tick logs
+   * Match orders with their outcomes by inferring from timestamp
+   * Each order's timestamp tells us which 15-minute interval it belongs to
    */
   async matchOrderOutcomes() {
-    // Load tick logs to determine outcomes
+    console.log('\nMatching orders to outcomes...');
+    
+    // Load tick logs to get final prices
     const filesDir = './files';
     const tickFiles = fs.readdirSync(filesDir)
       .filter(f => f.startsWith('ticks-') && f.endsWith('.jsonl'));
     
+    // Map: slug -> array of ticks
     const ticksBySlug = new Map();
     
     for (const file of tickFiles) {
@@ -118,6 +122,8 @@ class TradeAnalyzer {
       for (const line of lines) {
         try {
           const tick = JSON.parse(line);
+          if (!tick.slug) continue;
+          
           if (!ticksBySlug.has(tick.slug)) {
             ticksBySlug.set(tick.slug, []);
           }
@@ -135,41 +141,178 @@ class TradeAnalyzer {
     
     console.log(`Loaded ticks for ${ticksBySlug.size} market intervals`);
     
-    // Match each order to outcome
+    // Cache for interval outcomes to avoid duplicate API calls
+    const outcomeCache = new Map(); // slug -> { startPrice, endPrice, won: {UP: bool, DOWN: bool} }
+    
+    // For each order, infer which interval it belongs to
+    let matched = 0;
+    let matchedFromTicks = 0;
+    let matchedFromPolymarket = 0;
+    let unmatched = 0;
+    
     for (const order of this.orders) {
-      const ticks = ticksBySlug.get(order.slug);
-      if (!ticks) continue;
-      
-      // Find interval end (minsLeft ~= 0)
-      const endTick = ticks.find(t => t.minsLeft < 0.05);
-      if (!endTick) continue;
-      
-      // Determine outcome
-      const won = (order.side === 'UP' && endTick.currentPrice > endTick.startPrice) ||
-                  (order.side === 'DOWN' && endTick.currentPrice < endTick.startPrice);
-      
-      // Calculate minutes left at order time
-      // Find tick closest to order time
-      let closestTick = ticks[0];
-      for (const tick of ticks) {
-        if (Math.abs(tick.ts - order.ts) < Math.abs(closestTick.ts - order.ts)) {
-          closestTick = tick;
+      try {
+        // Infer the slug from order timestamp
+        const slug = this.inferSlugFromTimestamp(order.ts, order.symbol);
+        
+        let outcome = outcomeCache.get(slug);
+        
+        // Try to get outcome from tick data first
+        if (!outcome) {
+          const ticks = ticksBySlug.get(slug);
+          
+          if (ticks && ticks.length > 0) {
+            // Find the final tick (last one with minsLeft near 0)
+            const finalTick = ticks.find(t => t.minsLeft < 0.05) || ticks[ticks.length - 1];
+            
+            if (finalTick && finalTick.startPrice && finalTick.currentPrice) {
+              const priceUp = finalTick.currentPrice > finalTick.startPrice;
+              outcome = {
+                startPrice: finalTick.startPrice,
+                endPrice: finalTick.currentPrice,
+                won: { UP: priceUp, DOWN: !priceUp },
+                source: 'ticks'
+              };
+              outcomeCache.set(slug, outcome);
+              matchedFromTicks++;
+            }
+          }
         }
+        
+        // If no tick data, try to fetch from Polymarket API
+        if (!outcome) {
+          outcome = await this.fetchIntervalOutcome(slug, order.symbol);
+          if (outcome) {
+            outcomeCache.set(slug, outcome);
+            matchedFromPolymarket++;
+          }
+        }
+        
+        if (!outcome) {
+          unmatched++;
+          continue;
+        }
+        
+        // Determine if this specific order won
+        const won = outcome.won[order.side];
+        
+        // Calculate minutes left when order was placed
+        const intervalStart = this.getIntervalStartFromSlug(slug);
+        const intervalEnd = intervalStart + (15 * 60 * 1000);
+        const minsLeft = Math.max(0, (intervalEnd - order.ts) / 60000);
+        
+        // Store trade with outcome
+        this.trades.set(order.orderID, {
+          ...order,
+          slug,
+          won,
+          minsLeft,
+          isUS: order.session === 'US',
+          startPrice: outcome.startPrice,
+          endPrice: outcome.endPrice,
+          pnl: won ? (order.size * (1 - order.price)) : (-order.size * order.price)
+        });
+        
+        matched++;
+      } catch (err) {
+        unmatched++;
+        continue;
       }
-      
-      const minsLeft = closestTick.minsLeft || 0;
-      const isUS = order.session === 'US';
-      
-      this.trades.set(order.orderID, {
-        ...order,
-        won,
-        minsLeft,
-        isUS,
-        pnl: won ? (order.size * (1 - order.price)) : (-order.size * order.price)
-      });
     }
     
-    console.log(`Matched ${this.trades.size} trades with outcomes`);
+    console.log(`Matched ${matched} trades with outcomes`);
+    console.log(`  From tick logs: ${matchedFromTicks}`);
+    console.log(`  From Polymarket API: ${matchedFromPolymarket}`);
+    if (unmatched > 0) {
+      console.log(`Could not match ${unmatched} orders (interval not found)`);
+    }
+  }
+
+  /**
+   * Fetch interval outcome from Polymarket API
+   * Falls back to this when tick data is missing
+   */
+  async fetchIntervalOutcome(slug, symbol) {
+    try {
+      // Extract timestamp from slug
+      const intervalStart = this.getIntervalStartFromSlug(slug);
+      const intervalEnd = intervalStart + (15 * 60 * 1000);
+      
+      // Format dates for API
+      const startDate = new Date(intervalStart);
+      const endDate = new Date(intervalEnd);
+      
+      const startISO = startDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const endISO = endDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      
+      // Call Polymarket API
+      const url = `https://polymarket.com/api/crypto/crypto-price?symbol=${symbol}&eventStartTime=${startISO}&variant=fifteen&endDate=${endISO}`;
+      
+      const response = await fetch(url);
+      if (!response.ok) {
+        return null;
+      }
+      
+      const data = await response.json();
+      
+      if (!data.openPrice || !data.closePrice) {
+        return null;
+      }
+      
+      const startPrice = parseFloat(data.openPrice);
+      const endPrice = parseFloat(data.closePrice);
+      const priceUp = endPrice > startPrice;
+      
+      // Small delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      return {
+        startPrice,
+        endPrice,
+        won: { UP: priceUp, DOWN: !priceUp },
+        source: 'polymarket_api'
+      };
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * Infer the slug from order timestamp and symbol
+   * Format: btc-updown-15m-{unix_timestamp}
+   */
+  inferSlugFromTimestamp(orderTs, symbol) {
+    const slugPrefix = this.getSlugPrefix(symbol);
+    
+    // Round down to nearest 15-minute interval
+    const intervalMs = 15 * 60 * 1000;
+    const intervalStart = Math.floor(orderTs / intervalMs) * intervalMs;
+    const intervalStartUnix = Math.floor(intervalStart / 1000);
+    
+    return `${slugPrefix}-updown-15m-${intervalStartUnix}`;
+  }
+
+  /**
+   * Get slug prefix for a symbol
+   */
+  getSlugPrefix(symbol) {
+    const prefixes = {
+      'BTC': 'btc',
+      'ETH': 'eth',
+      'SOL': 'sol',
+      'XRP': 'xrp'
+    };
+    return prefixes[symbol] || symbol.toLowerCase();
+  }
+
+  /**
+   * Extract interval start timestamp from slug
+   * Format: btc-updown-15m-1732752000
+   */
+  getIntervalStartFromSlug(slug) {
+    const parts = slug.split('-');
+    const unixSeconds = parseInt(parts[parts.length - 1]);
+    return unixSeconds * 1000; // Convert to milliseconds
   }
 
   /**

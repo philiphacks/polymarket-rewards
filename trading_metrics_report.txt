@@ -1,6 +1,6 @@
 ================================================================================
 MONEYTRON TRADING METRICS REPORT
-Generated: 2025-11-27T19:27:43.163Z
+Generated: 2025-11-27T19:42:52.061Z
 Analysis Period: Last 14 days
 ================================================================================
 
@@ -23,43 +23,49 @@ Status: ❌ NEEDS IMPROVEMENT
 
 0-2 MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 0 trades | Win Rate: 0.0% | Target: 65% | ❌
-  Wins: undefined | Losses: undefined | Confidence: INSUFFICIENT_DATA
-  PnL: $0.00 | Avg: $0.00
+Overall: 2724 trades | Win Rate: 96.5% | Target: 65% | ✅
+  Wins: 2628 | Losses: 96 | Confidence: HIGH
+  PnL: $5022.60 | Avg: $1.84
 
-  No trades in this window yet
+  US Hours:     153 trades | Win Rate:  96.7% | ✅
+  Non-US Hours: 2571 trades | Win Rate:  96.5% | ✅
+  Gap: 0.3% ✅
 
 2-3 MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 0 trades | Win Rate: 0.0% | Target: 60% | ❌
-  Wins: undefined | Losses: undefined | Confidence: INSUFFICIENT_DATA
-  PnL: $0.00 | Avg: $0.00
+Overall: 1939 trades | Win Rate: 92.6% | Target: 60% | ✅
+  Wins: 1795 | Losses: 144 | Confidence: HIGH
+  PnL: $1124.80 | Avg: $0.58
 
-  No trades in this window yet
+  US Hours:     119 trades | Win Rate:  94.1% | ✅
+  Non-US Hours: 1820 trades | Win Rate:  92.5% | ✅
+  Gap: 1.6% ✅
 
 3-5 MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 0 trades | Win Rate: 0.0% | Target: 55% | ❌
-  Wins: undefined | Losses: undefined | Confidence: INSUFFICIENT_DATA
-  PnL: $0.00 | Avg: $0.00
+Overall: 2035 trades | Win Rate: 98.2% | Target: 55% | ✅
+  Wins: 1998 | Losses: 37 | Confidence: HIGH
+  PnL: $2366.80 | Avg: $1.16
 
-  No trades in this window yet
+  US Hours:     41  trades | Win Rate:  85.4% | ✅
+  Non-US Hours: 1994 trades | Win Rate:  98.4% | ✅
+  Gap: 13.1% ⚠️
 
 5-10 MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 0 trades | Win Rate: 0.0% | Target: 50% | ❌
-  Wins: undefined | Losses: undefined | Confidence: INSUFFICIENT_DATA
-  PnL: $0.00 | Avg: $0.00
+Overall: 2103 trades | Win Rate: 97.6% | Target: 50% | ✅
+  Wins: 2052 | Losses: 51 | Confidence: HIGH
+  PnL: $888.40 | Avg: $0.42
 
-  No trades in this window yet
+  Non-US Hours only: 2103 trades | Win Rate: 97.6%
 
 10+ MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 0 trades | Win Rate: 0.0% | Target: 50% | ❌
-  Wins: undefined | Losses: undefined | Confidence: INSUFFICIENT_DATA
-  PnL: $0.00 | Avg: $0.00
+Overall: 416 trades | Win Rate: 83.4% | Target: 50% | ✅
+  Wins: 347 | Losses: 69 | Confidence: HIGH
+  PnL: $-621.20 | Avg: $-1.49
 
-  No trades in this window yet
+  Non-US Hours only: 416 trades | Win Rate: 83.4%
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 RECOMMENDATIONS

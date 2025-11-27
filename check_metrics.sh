@@ -40,6 +40,8 @@ echo ""
 DAYS=14
 OUTPUT=""
 QUICK=false
+FORCE_FULL=false
+FORCE_SIMPLE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -55,6 +57,14 @@ while [[ $# -gt 0 ]]; do
             OUTPUT="$2"
             shift 2
             ;;
+        --full)
+            FORCE_FULL=true
+            shift
+            ;;
+        --simple)
+            FORCE_SIMPLE=true
+            shift
+            ;;
         --help)
             echo "Usage: ./check_metrics.sh [OPTIONS]"
             echo ""
@@ -62,13 +72,18 @@ while [[ $# -gt 0 ]]; do
             echo "  --quick          Run daily stats only (fast)"
             echo "  --days N         Analyze last N days (default: 14)"
             echo "  --output FILE    Save report to FILE"
+            echo "  --full           Force full win/loss analysis (requires tick data)"
+            echo "  --simple         Force simple pattern analysis (no tick data needed)"
             echo "  --help           Show this help"
+            echo ""
+            echo "By default, automatically selects full analysis if tick data exists."
             echo ""
             echo "Examples:"
             echo "  ./check_metrics.sh"
             echo "  ./check_metrics.sh --quick"
             echo "  ./check_metrics.sh --days 30"
-            echo "  ./check_metrics.sh --output weekly_report.txt"
+            echo "  ./check_metrics.sh --full"
+            echo "  ./check_metrics.sh --simple --output report.txt"
             exit 0
             ;;
         *)
@@ -94,17 +109,45 @@ node daily_stats.js
 echo ""
 echo ""
 
-echo -e "${GREEN}Step 2: Comprehensive Analysis (Last $DAYS days)${NC}"
+echo -e "${GREEN}Step 2: Analysis (Last $DAYS days)${NC}"
 echo "─────────────────────────────────────────────────────────────"
 
+# Determine which script to use
+SCRIPT=""
+DEFAULT_OUTPUT=""
+
+if [ "$FORCE_FULL" = true ]; then
+    SCRIPT="analyze_trading_metrics.js"
+    DEFAULT_OUTPUT="trading_metrics_report.txt"
+    echo "Forcing full win/loss analysis..."
+elif [ "$FORCE_SIMPLE" = true ]; then
+    SCRIPT="simple_metrics.js"
+    DEFAULT_OUTPUT="simple_metrics_report.txt"
+    echo "Forcing simple pattern analysis..."
+else
+    # Auto-detect based on tick data availability
+    TICK_COUNT=$(ls -1 ./files/ticks-*.jsonl 2>/dev/null | wc -l)
+    
+    if [ "$TICK_COUNT" -gt 0 ]; then
+        echo "Tick data found - running full win/loss analysis..."
+        SCRIPT="analyze_trading_metrics.js"
+        DEFAULT_OUTPUT="trading_metrics_report.txt"
+    else
+        echo "No tick data - running pattern analysis..."
+        SCRIPT="simple_metrics.js"
+        DEFAULT_OUTPUT="simple_metrics_report.txt"
+    fi
+fi
+
 if [ -n "$OUTPUT" ]; then
-    node analyze_trading_metrics.js --days "$DAYS" --output "$OUTPUT"
+    node "$SCRIPT" --days "$DAYS" --output "$OUTPUT"
     echo ""
     echo -e "${GREEN}✅ Report saved to: $OUTPUT${NC}"
 else
-    node analyze_trading_metrics.js --days "$DAYS"
+    node "$SCRIPT" --days "$DAYS"
     echo ""
-    echo -e "${GREEN}✅ Report saved to: trading_metrics_report.txt${NC}"
+    echo -e "${GREEN}✅ Report saved to: $DEFAULT_OUTPUT${NC}"
+    OUTPUT="$DEFAULT_OUTPUT"
 fi
 
 echo ""
@@ -114,7 +157,7 @@ echo -e "${BLUE}═════════════════════�
 echo ""
 
 # Check if report recommends action
-REPORT_FILE=${OUTPUT:-trading_metrics_report.txt}
+REPORT_FILE="$OUTPUT"
 if [ -f "$REPORT_FILE" ]; then
     if grep -q "Ready for Next Phase: ✅ YES" "$REPORT_FILE"; then
         echo -e "${YELLOW}🎯 ACTION REQUIRED: You're ready for the next phase!${NC}"
