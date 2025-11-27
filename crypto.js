@@ -1576,11 +1576,13 @@ async function execForAsset(asset, priceData) {
         for (let i = 0; i < LAYER_OFFSETS.length; i++) {
           let target = sideAsk + LAYER_OFFSETS[i];
           target = Math.max(0.01, Math.min(target, 0.99));
-          const maxPrice = getMaxPriceForTime(minsLeft);
-          if (target > maxPrice) {
-            logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
-            continue;
-          }
+
+          // Do not use this for now
+          // const maxPrice = getMaxPriceForTime(minsLeft);
+          // if (target > maxPrice) {
+          //   logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+          //   continue;
+          // }
 
           const ev = sideProb - target;
           let minEv = LAYER_MIN_EV[i];
