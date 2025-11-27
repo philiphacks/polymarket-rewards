@@ -1728,9 +1728,9 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    if (!checkRiskReward(best.ask, size, minsLeft, logger)) {
-      return;
-    }
+    // if (!checkRiskReward(best.ask, size, minsLeft, logger)) {
+    //   return;
+    // }
 
     if (minsLeft < 1.0) {
       if (prob < 0.90) {
