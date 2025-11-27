@@ -1003,6 +1003,10 @@ async function execForAsset(asset, priceData) {
     }
     if (isInSlamWindow()) return;
     if (minsLeft > 14) return;
+    if (minsLeft < 0.17) { // 10 seconds
+      logger.log(`🛑 ULTRA LATE: ${(minsLeft * 60).toFixed(0)}s left - no trading`);
+      return;
+    }
 
     // 2) Start Price
     let startPrice;
@@ -1663,15 +1667,28 @@ async function execForAsset(asset, priceData) {
     }
 
     const sizeInfo = minsLeft > 5 ? ` (Early trade: ${(size / EARLY_TRADE_SIZE_MULTIPLIER).toFixed(0)} → ${size})` : '';
-    
+
     // BUG FIX #3: Store entryZ right before placing order
     if (state.entryZ === null) {
       state.entryZ = z;
       logger.log(`[Entry Signal] Stored z=${z.toFixed(2)} (NORMAL entry)`);
     }
-    
+
+    if (minsLeft < 1.0) {
+      if (prob < 0.90) {
+        logger.log(`🛑 NORMAL order too late with low conviction: ${(prob * 100).toFixed(1)}% at ${(minsLeft * 60).toFixed(0)}s`);
+        return;
+      }
+
+      const profitMargin = 1.0 - best.ask;
+      if (profitMargin < 0.20) {
+        logger.log(`🛑 NORMAL order: margin too thin ($${profitMargin.toFixed(2)}) for ${(prob * 100).toFixed(1)}% conviction`);
+        return;
+      }
+    }
+
     logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size}${sizeInfo})`);
-    
+
     try {
       const resp = await client.createAndPostOrder({
         tokenID: best.side === "UP" ? upTokenId : downTokenId,
