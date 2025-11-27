@@ -1499,7 +1499,7 @@ async function execForAsset(asset, priceData) {
 
           // CRITICAL: Check if signal flipped sign FIRST
           const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
-          
+
           if (!sameSign) {
             // Signal reversed - always block regardless of magnitude
             logger.log(`⛔ LATE_LAYER CAP: Signal reversed ${entrySignalForCap.toFixed(2)} → ${currentSignalForCap.toFixed(2)}`);
@@ -1509,7 +1509,7 @@ async function execForAsset(asset, priceData) {
           // Same sign - check if weakening
           const currentStrength = Math.abs(currentSignalForCap);
           const signalWeakening = (entryStrength - currentStrength) / entryStrength;
-          
+
           if (signalWeakening > 0.3) {
             logger.log(`⛔ LATE_LAYER CAP: Signal weakened ${(signalWeakening*100).toFixed(0)}% (${totalShares} shares)`);
             return;
