@@ -1606,7 +1606,8 @@ async function execForAsset(asset, priceData) {
           let target = sideAsk + LAYER_OFFSETS[i];
           target = Math.max(0.01, Math.min(target, 0.99));
 
-          // Only used when minsLeft < 3 (late-ish, prices are naturally high),
+          // Only checked for early LATE_LAYER (>3 mins) - prevents expensive bets with lots of reversal time
+          // Late game LATE_LAYER (<3 mins) has no max price cap - trust the proven signal
           const maxPrice = getMaxPriceForTime(minsLeft);
           if (minsLeft > MINUTES_LEFT && target > maxPrice) {
             logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
