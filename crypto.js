@@ -1606,16 +1606,12 @@ async function execForAsset(asset, priceData) {
           let target = sideAsk + LAYER_OFFSETS[i];
           target = Math.max(0.01, Math.min(target, 0.99));
 
-          // Do not use this for now
-          // Max price check commented out - in practice LATE_LAYER only runs when:
-          // 1. minsLeft < 2 (very late, prices are naturally high), OR
-          // 2. absZ > zMaxTimeBased (huge signal justifies any price)
-          // So this check is redundant - expensive prices with lots of time don't occur in LATE_LAYER
-          // const maxPrice = getMaxPriceForTime(minsLeft);
-          // if (target > maxPrice) {
-          //   logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
-          //   continue;
-          // }
+          // Only used when minsLeft < 3 (late-ish, prices are naturally high),
+          const maxPrice = getMaxPriceForTime(minsLeft);
+          if (minsLeft > MINUTES_LEFT && target > maxPrice) {
+            logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+            continue;
+          }
 
           const ev = sideProb - target;
           let minEv = LAYER_MIN_EV[i];
