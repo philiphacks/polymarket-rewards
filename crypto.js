@@ -352,13 +352,34 @@ function getMaxPriceForTime(minsLeft) {
   return MAX_PRICE_BY_TIME[0];
 }
 
-function checkRiskReward(price, size, minsLeft, logger) {
+function checkRiskReward(price, size, prob, minsLeft, logger) {
   const reward = size * (1.00 - price);
   const risk = size * price;
   const ratio = risk / reward;
 
-  if (ratio > MAX_RISK_REWARD_RATIO) {
-    logger.log(`🛑 Risk/reward: ${ratio.toFixed(1)}:1 > ${MAX_RISK_REWARD_RATIO}:1 max`);
+  // Calculate probability-adjusted max ratio
+  // Higher probability = allow worse ratios
+  // At 50% prob: max 15:1
+  // At 90% prob: max 50:1
+  // At 99% prob: max 200:1
+
+  let maxRatio;
+  if (prob >= 0.95) {
+    // Very high probability: allow up to 100:1
+    maxRatio = 100;
+  } else if (prob >= 0.90) {
+    // High probability: allow up to 50:1
+    maxRatio = 50;
+  } else if (prob >= 0.80) {
+    // Medium-high: allow up to 25:1
+    maxRatio = 25;
+  } else {
+    // Lower probability: strict 15:1
+    maxRatio = 15;
+  }
+
+  if (ratio > maxRatio) {
+    logger.log(`🛑 Risk/reward: ${ratio.toFixed(1)}:1 > ${maxRatio.toFixed(1)}:1 max (prob=${(prob*100).toFixed(1)}%)`);
     logger.log(`   Risking $${risk.toFixed(2)} to win $${reward.toFixed(2)}`);
     return false;
   }
@@ -1606,10 +1627,10 @@ async function execForAsset(asset, priceData) {
             logger.log(`Late layer ${i}: size <= 0, skipping.`);
             continue;
           }
-          // if (minsLeft > MINUTES_LEFT && !checkRiskReward(target, layerSize, minsLeft, logger)) {
-          //   logger.log(`Layer ${i}: skip, risk/reward too poor`);
-          //   continue;
-          // }
+          if (minsLeft > MINUTES_LEFT && !checkRiskReward(target, layerSize, sideProb, minsLeft, logger)) {
+            logger.log(`Layer ${i}: skip, risk/reward too poor`);
+            continue;
+          }
 
           const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
           const corrCheck = checkCorrelationRisk(state, asset.symbol, lateSide, layerSize);
@@ -1728,9 +1749,9 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    // if (!checkRiskReward(best.ask, size, minsLeft, logger)) {
-    //   return;
-    // }
+    if (!checkRiskReward(best.ask, size, prob, minsLeft, logger)) {
+      return;
+    }
 
     if (minsLeft < 1.0) {
       if (prob < 0.90) {
