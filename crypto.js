@@ -846,7 +846,7 @@ function isInSlamWindow(date = new Date()) {
 
 function isUSTradingHours(date = new Date()) {
   const totalMins = date.getUTCHours() * 60 + date.getUTCMinutes();
-  return totalMins >= 12 * 60 + 45 && totalMins < 19 * 60 + 45;
+  return totalMins >= 13 * 60 + 45 && totalMins < 19 * 60 + 45;
 }
 
 // Logging
