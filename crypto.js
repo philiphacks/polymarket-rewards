@@ -394,17 +394,17 @@ function checkRiskReward(price, size, prob, minsLeft, logger) {
 function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft, logger) {
   const entryZ = state.entryZ;
   const totalShares = sharesUp + sharesDown;
-  
+
   // No position or too small to bother
   if (totalShares < EXIT_MIN_POSITION_SIZE) {
     return { shouldExit: false };
   }
-  
+
   // No entry signal recorded (shouldn't happen but be safe)
   if (entryZ === null || entryZ === undefined) {
     return { shouldExit: false };
   }
-  
+
   // Don't exit in final 30 seconds (too late, just let it expire)
   if (minsLeft < 0.5) {
     // Still allow emergency exits if reversal is HUGE (>2σ)
@@ -413,12 +413,12 @@ function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft
     const signalFlipped = Math.sign(entryZ) !== Math.sign(z) && 
                           Math.sign(entryZ) !== 0 && 
                           Math.sign(z) !== 0;
-    
+
     if (!(signalFlipped && reversalMagnitude > 2.0)) {
       logger.log(`⏰ <30s left: only extreme reversals (>2σ) can exit`);
       return { shouldExit: false };
     }
-    
+
     logger.log(`🚨 EMERGENCY: Extreme reversal ${reversalMagnitude.toFixed(2)}σ with <30s left`);
     // Allow exit to continue...
   }

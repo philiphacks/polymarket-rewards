@@ -4,8 +4,6 @@ import readline from "readline";
 // ================= CONFIG =================
 const SLUGS_TO_EXTRACT = [
   "sol-updown-15m-1764259200",
-  "eth-updown-15m-1764257400",
-  "eth-updown-15m-1764263700"
 ];
 
 const ORDER_FILES = [
