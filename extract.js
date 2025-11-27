@@ -3,9 +3,7 @@ import readline from "readline";
 
 // ================= CONFIG =================
 const SLUGS_TO_EXTRACT = [
-  "eth-updown-15m-1764167400",
-  "btc-updown-15m-1764167400",
-  "xrp-updown-15m-1764167400"
+  "eth-updown-15m-1764222300"
 ];
 
 const ORDER_FILES = [
@@ -14,6 +12,7 @@ const ORDER_FILES = [
   "files/orders-2025-11-24.jsonl",
   "files/orders-2025-11-25.jsonl",
   "files/orders-2025-11-26.jsonl",
+  "files/orders-2025-11-27.jsonl",
 ];
 
 const TICK_FILES = [
@@ -24,6 +23,7 @@ const TICK_FILES = [
   "files/ticks-20251124.jsonl",
   "files/ticks-20251125.jsonl",
   "files/ticks-20251126.jsonl",
+  "files/ticks-20251127.jsonl",
 ];
 
 // ==========================================

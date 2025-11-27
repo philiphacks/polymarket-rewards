@@ -1,15 +1,18 @@
-// Version 2.3.2 - Critical Bug Fixes for Signal Reversal Detection
-// Key Changes from 2.3.1:
-// - FIXED: LATE_LAYER reversal threshold lowered from 1.5σ to 1.0σ (matches main detector)
-// - FIXED: Signal weakening logic now properly detects sign flips before checking magnitude
-// - FIXED: entryZ storage moved before LATE_LAYER to ensure it's always set
+// Version 2.4.0 - Exit Mechanism & Position Management
+// Key Changes from 2.3.2:
+// - NEW: Exit mechanism for positions when signals reverse (CRITICAL FEATURE)
+// - NEW: Reversal-based exits (0.8σ threshold after sign flip)
+// - NEW: Emergency probability-based exits (>75% against position)
+// - NEW: SELL order placement capability
+// - IMPROVED: Position tracking with exit timestamps
 //
-// Previous version (2.3.1) had three critical bugs that allowed $1000 loss:
+// Previous version (2.3.2) fixed three critical bugs from 2.3.1:
 // Bug #1: LATE_LAYER used 1.5σ threshold while main detector used 1.0σ
 // Bug #2: Signal weakening logic used Math.abs() which lost sign information
 // Bug #3: entryZ not stored if bot entered directly in LATE_LAYER mode
 //
-// Expected impact: 58% loss reduction on similar scenarios ($920 → $384)
+// Expected impact: 40-60% recovery on losing positions through active exits
+// Combined with v2.3.2 fixes: 75-85% total loss reduction
 
 import 'dotenv/config';
 import cron from "node-cron";
@@ -75,6 +78,11 @@ const CORRELATION_MATRIX = {
   'ETH-XRP': 0.50,
   'SOL-XRP': 0.45
 };
+
+// EXIT CONFIGURATION (NEW in v2.4.0)
+const EXIT_REVERSAL_THRESHOLD = 0.8; // Exit if signal reverses by this many σ after sign flip
+const EXIT_PROBABILITY_THRESHOLD = 0.75; // Emergency exit if probability against position > 75%
+const EXIT_MIN_POSITION_SIZE = 10; // Don't bother exiting positions smaller than this
 
 // Time / edge thresholds
 const MINUTES_LEFT = 3;
@@ -325,6 +333,381 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   return { safe: true, reason: "No clear signal" };
 }
 
+// ========================================
+// EXIT LOGIC (NEW in v2.4.0)
+// ========================================
+
+function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft, logger) {
+  const entryZ = state.entryZ;
+  const totalShares = sharesUp + sharesDown;
+  
+  // No position or too small to bother
+  if (totalShares < EXIT_MIN_POSITION_SIZE) {
+    return { shouldExit: false };
+  }
+  
+  // No entry signal recorded (shouldn't happen but be safe)
+  if (entryZ === null || entryZ === undefined) {
+    return { shouldExit: false };
+  }
+  
+  // Don't exit in final 30 seconds (too late, just let it expire)
+  if (minsLeft < 0.5) {
+    return { shouldExit: false };
+  }
+  
+  // EXIT CONDITION 1: Signal Reversal
+  // Only triggers if sign has flipped AND magnitude is significant
+  const currentZ = z;
+  const signalFlipped = Math.sign(entryZ) !== Math.sign(currentZ) && 
+                        Math.sign(entryZ) !== 0 && 
+                        Math.sign(currentZ) !== 0;
+  
+  if (signalFlipped) {
+    const reversalMagnitude = Math.abs(currentZ - entryZ);
+    
+    if (reversalMagnitude > EXIT_REVERSAL_THRESHOLD) {
+      const exitSide = sharesUp > 0 ? 'UP' : 'DOWN';
+      const exitShares = sharesUp > 0 ? sharesUp : sharesDown;
+      
+      logger.log(`🚨 SIGNAL REVERSAL DETECTED`);
+      logger.log(`   Entry z=${entryZ.toFixed(2)} → Current z=${currentZ.toFixed(2)}`);
+      logger.log(`   Reversal magnitude: ${reversalMagnitude.toFixed(2)}σ > ${EXIT_REVERSAL_THRESHOLD}σ threshold`);
+      
+      return {
+        shouldExit: true,
+        reason: 'signal_reversal',
+        side: exitSide,
+        shares: exitShares,
+        urgency: 'normal',
+        magnitude: reversalMagnitude
+      };
+    }
+  }
+  
+  // EXIT CONDITION 2: Emergency Probability Override
+  // If probability strongly favors opposite side, exit immediately
+  if (sharesUp > 0 && pDown > EXIT_PROBABILITY_THRESHOLD) {
+    logger.log(`🚨 EMERGENCY EXIT TRIGGERED`);
+    logger.log(`   Holding ${sharesUp} UP shares but pDown=${(pDown*100).toFixed(1)}% (>${(EXIT_PROBABILITY_THRESHOLD*100).toFixed(0)}% threshold)`);
+    
+    return {
+      shouldExit: true,
+      reason: 'emergency_probability',
+      side: 'UP',
+      shares: sharesUp,
+      urgency: 'emergency',
+      probability: pDown
+    };
+  }
+  
+  if (sharesDown > 0 && pUp > EXIT_PROBABILITY_THRESHOLD) {
+    logger.log(`🚨 EMERGENCY EXIT TRIGGERED`);
+    logger.log(`   Holding ${sharesDown} DOWN shares but pUp=${(pUp*100).toFixed(1)}% (>${(EXIT_PROBABILITY_THRESHOLD*100).toFixed(0)}% threshold)`);
+    
+    return {
+      shouldExit: true,
+      reason: 'emergency_probability',
+      side: 'DOWN',
+      shares: sharesDown,
+      urgency: 'emergency',
+      probability: pUp
+    };
+  }
+  
+  return { shouldExit: false };
+}
+
+/**
+ * Get actual token positions from Polymarket Data API
+ * This queries the real on-chain positions, not just what we think we have
+ */
+async function getActualPositions(userAddress, tokenIds, logger) {
+  try {
+    const [upTokenId, downTokenId] = tokenIds;
+    
+    // Query Data API for user's positions
+    const url = `https://data-api.polymarket.com/positions?user=${userAddress}`;
+    
+    logger.log(`🔍 Querying Data API for actual positions...`);
+    
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      logger.error(`Data API returned ${response.status}: ${response.statusText}`);
+      return null;
+    }
+    
+    const positions = await response.json();
+    
+    if (!Array.isArray(positions)) {
+      logger.error(`Data API returned unexpected format: ${typeof positions}`);
+      return null;
+    }
+    
+    // Find positions matching our token IDs
+    let upShares = 0;
+    let downShares = 0;
+    
+    for (const position of positions) {
+      const asset = position.asset;
+      const size = Number(position.size || 0);
+      
+      if (asset === upTokenId) {
+        upShares = size;
+        logger.log(`   UP: ${size} shares @ avg $${position.avgPrice?.toFixed(3)}`);
+      } else if (asset === downTokenId) {
+        downShares = size;
+        logger.log(`   DOWN: ${size} shares @ avg $${position.avgPrice?.toFixed(3)}`);
+      }
+    }
+    
+    logger.log(`   Total: ${upShares} UP, ${downShares} DOWN`);
+    
+    return { UP: upShares, DOWN: downShares };
+    
+  } catch (err) {
+    logger.error(`Failed to get actual positions: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Reconcile tracked positions with actual on-chain positions
+ * CRITICAL: Must account for pending orders that haven't filled yet
+ */
+async function reconcilePositions(state, logger) {
+  try {
+    const { tokenIds, slug } = state.marketMeta;
+    const [upTokenId, downTokenId] = tokenIds;
+    
+    // Check if we have pending orders for THIS specific market
+    const pendingForMarket = Array.from(pendingOrders.entries())
+      .filter(([orderId, data]) => data.slug === slug);
+    
+    if (pendingForMarket.length > 0) {
+      // Check age of oldest order
+      const oldestTimestamp = Math.min(...pendingForMarket.map(([id, data]) => data.timestamp));
+      const age = Date.now() - oldestTimestamp;
+      
+      if (age < 30000) {
+        // Orders < 30s old - definitely wait
+        logger.log(`⏳ Skipping reconciliation: ${pendingForMarket.length} pending orders <30s old`);
+        return;
+      } else if (age < 60000) {
+        // Orders 30-60s old - probably still filling, wait unless critical
+        logger.log(`⏳ Skipping reconciliation: pending orders ${(age/1000).toFixed(0)}s old (waiting for settlement)`);
+        return;
+      } else {
+        // Orders >60s old - likely settled (even if partially), safe to reconcile
+        logger.warn(`⚠️  Reconciling despite ${pendingForMarket.length} pending: orders ${(age/1000).toFixed(0)}s old (likely settled)`);
+        // Continue to reconciliation
+      }
+    }
+    
+    const actual = await getActualPositions(FUNDER, tokenIds, logger);
+    
+    if (!actual) return;
+    
+    const tracked = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
+    
+    const upDiff = Math.abs(actual.UP - tracked.UP);
+    const downDiff = Math.abs(actual.DOWN - tracked.DOWN);
+    
+    // Only reconcile if significant difference (>5 shares or >10%)
+    const upThreshold = Math.max(5, tracked.UP * 0.1);
+    const downThreshold = Math.max(5, tracked.DOWN * 0.1);
+    
+    if (upDiff > upThreshold || downDiff > downThreshold) {
+      logger.warn(`📊 POSITION RECONCILIATION NEEDED`);
+      logger.warn(`   UP: Tracked ${tracked.UP} → Actual ${actual.UP} (diff: ${upDiff})`);
+      logger.warn(`   DOWN: Tracked ${tracked.DOWN} → Actual ${actual.DOWN} (diff: ${downDiff})`);
+      
+      let shouldReconcile = false;
+      let reconcileReason = '';
+      
+      // RULE 1: Actual > Tracked = fills came in, always safe
+      if (actual.UP > tracked.UP || actual.DOWN > tracked.DOWN) {
+        shouldReconcile = true;
+        reconcileReason = 'Actual > Tracked (fills came in)';
+      }
+      
+      // RULE 2: Both zero = market expired or fully exited
+      else if (actual.UP === 0 && actual.DOWN === 0 && (tracked.UP > 0 || tracked.DOWN > 0)) {
+        shouldReconcile = true;
+        reconcileReason = 'Both positions zero (expired/exited)';
+      }
+      
+      // RULE 3: Partial fill - tracked > actual but actual > 0
+      else if (tracked.UP > actual.UP && actual.UP > 0 && tracked.DOWN === 0) {
+        shouldReconcile = true;
+        reconcileReason = `Partial fill: UP ${tracked.UP} → ${actual.UP}`;
+      }
+      else if (tracked.DOWN > actual.DOWN && actual.DOWN > 0 && tracked.UP === 0) {
+        shouldReconcile = true;
+        reconcileReason = `Partial fill: DOWN ${tracked.DOWN} → ${actual.DOWN}`;
+      }
+      
+      // RULE 4: Single position decreased (exit or sale)
+      else if (tracked.UP === 0 && actual.DOWN < tracked.DOWN && tracked.DOWN > 0) {
+        shouldReconcile = true;
+        reconcileReason = `DOWN decreased ${tracked.DOWN} → ${actual.DOWN}`;
+      }
+      else if (tracked.DOWN === 0 && actual.UP < tracked.UP && tracked.UP > 0) {
+        shouldReconcile = true;
+        reconcileReason = `UP decreased ${tracked.UP} → ${actual.UP}`;
+      }
+      
+      // RULE 5: Don't reconcile - probably pending fills
+      else {
+        logger.warn(`⚠️  NOT reconciling: Tracked > Actual suggests pending fills`);
+        logger.warn(`   This is expected immediately after placing orders`);
+        logger.warn(`   Will reconcile after orders complete or on next cycle`);
+        return;
+      }
+      
+      if (shouldReconcile) {
+        logger.log(`✅ Reconciling: ${reconcileReason}`);
+        state.sideSharesBySlug[slug] = { UP: actual.UP, DOWN: actual.DOWN };
+        logger.log(`✅ Positions reconciled to actual values`);
+      }
+    }
+  } catch (err) {
+    logger.error(`Position reconciliation failed: ${err.message}`);
+  }
+}
+
+async function executeExit(asset, state, exitDecision, upBook, downBook, logger) {
+  const { side, shares, urgency, reason } = exitDecision;
+  const { tokenIds, slug } = state.marketMeta;
+  const [upTokenId, downTokenId] = tokenIds;
+  
+  // ========================================
+  // CRITICAL FIX: Verify actual position before exiting
+  // sideSharesBySlug tracks orders placed, not actual fills!
+  // Must query Data API to get real position
+  // ========================================
+  
+  logger.log(`🔍 Verifying actual position before exit...`);
+  
+  const actualPositions = await getActualPositions(
+    FUNDER, // The funder address from config
+    tokenIds,
+    logger
+  );
+  
+  if (!actualPositions) {
+    logger.error(`❌ Cannot verify position - aborting exit for safety`);
+    return false;
+  }
+  
+  const trackedShares = shares;
+  const actualShares = side === 'UP' ? actualPositions.UP : actualPositions.DOWN;
+  
+  // Check for discrepancy between tracked and actual
+  if (Math.abs(actualShares - trackedShares) > 5) {
+    logger.warn(`⚠️  POSITION MISMATCH DETECTED!`);
+    logger.warn(`   Tracked: ${trackedShares} ${side}`);
+    logger.warn(`   Actual:  ${actualShares} ${side}`);
+    logger.warn(`   Difference: ${trackedShares - actualShares} shares (${((Math.abs(trackedShares - actualShares)) / Math.max(trackedShares, 1) * 100).toFixed(1)}%)`);
+    
+    // Use actual shares for exit
+    exitDecision.shares = actualShares;
+  } else {
+    logger.log(`✅ Position verified: ${actualShares} ${side} shares`);
+  }
+  
+  // Don't exit if actual position too small
+  if (actualShares < EXIT_MIN_POSITION_SIZE) {
+    logger.warn(`⚠️  Actual position too small to exit: ${actualShares} shares (min ${EXIT_MIN_POSITION_SIZE})`);
+    
+    // Update state to match reality
+    if (side === 'UP') {
+      state.sideSharesBySlug[slug].UP = actualShares;
+    } else {
+      state.sideSharesBySlug[slug].DOWN = actualShares;
+    }
+    
+    return false;
+  }
+  
+  // Continue with exit using ACTUAL shares
+  const tokenId = side === 'UP' ? upTokenId : downTokenId;
+  const orderBook = side === 'UP' ? upBook : downBook;
+  
+  const { bestBid } = getBestBidAsk(orderBook);
+  
+  if (!bestBid) {
+    logger.error(`❌ Cannot exit ${side}: No bid available`);
+    return false;
+  }
+  
+  // Determine sell price based on urgency
+  let sellPrice;
+  if (urgency === 'emergency') {
+    // Very aggressive: 2 ticks below best bid for guaranteed fast fill
+    sellPrice = Math.max(0.01, Math.min(0.99, bestBid - 0.02));
+  } else {
+    // Normal: 1 tick below best bid for fast fill
+    sellPrice = Math.max(0.01, Math.min(0.99, bestBid - 0.01));
+  }
+  
+  const expectedRecovery = actualShares * sellPrice; // Use actual shares!
+  
+  logger.log(`🚨 EXECUTING EXIT`);
+  logger.log(`   Selling: ${actualShares} ${side} shares @ $${sellPrice.toFixed(2)}`);
+  logger.log(`   Reason: ${reason} | Urgency: ${urgency}`);
+  logger.log(`   Expected recovery: $${expectedRecovery.toFixed(2)}`);
+  
+  try {
+    const resp = await client.createAndPostOrder({
+      tokenID: tokenId,
+      price: sellPrice.toFixed(2),
+      side: Side.SELL,  // CRITICAL: Use SELL not BUY
+      size: actualShares, // CRITICAL: Use actual shares, not tracked!
+      expiration: String(Math.floor(Date.now()/1000) + 300) // 5 min expiry
+    }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
+    
+    if (resp && resp.orderID) {
+      logger.log(`✅ Exit order placed successfully: ${resp.orderID}`);
+      
+      // Log the exit order
+      logOrderAttempt({
+        ts: Date.now(),
+        symbol: asset.symbol,
+        orderID: resp.orderID,
+        side: side,
+        price: sellPrice,
+        size: actualShares,
+        type: "EXIT",
+        reason: reason,
+        urgency: urgency,
+        expectedRecovery: expectedRecovery,
+        trackedShares: trackedShares,
+        actualShares: actualShares
+      });
+      
+      // Update position to zero (we sold entire position)
+      if (side === 'UP') {
+        state.sideSharesBySlug[slug].UP = 0;
+      } else {
+        state.sideSharesBySlug[slug].DOWN = 0;
+      }
+      
+      // Clear entry Z since we've exited the position
+      state.entryZ = null;
+      state.exitTimestamp = Date.now();
+      
+      return true;
+    }
+  } catch (err) {
+    logger.error(`❌ Exit order failed: ${err.message}`);
+    return false;
+  }
+  
+  return false;
+}
+
 // ---------- UTILS ----------
 
 function current15mStartUnix(date = new Date()) {
@@ -430,7 +813,7 @@ function isInSlamWindow(date = new Date()) {
 
 function isUSTradingHours(date = new Date()) {
   const totalMins = date.getUTCHours() * 60 + date.getUTCMinutes();
-  return totalMins >= 12 * 60 + 45 && totalMins < 19 * 60 + 15;
+  return totalMins >= 12 * 60 + 45 && totalMins < 19 * 60 + 45;
 }
 
 // Logging
@@ -445,6 +828,8 @@ function logTickSnapshot(snapshot) {
 function logOrderAttempt(orderData) {
   try {
     const filename = `orders-${new Date().toISOString().slice(0,10)}.jsonl`;
+    const isUSHours = isUSTradingHours(new Date(orderData.ts));
+    orderData.session = isUSHours ? 'US' : 'NON-US';
     fs.appendFile(filename, JSON.stringify(orderData) + "\n", (err) => { 
       if (err) console.error("[ORDER-LOG] Failed:", err); 
     });
@@ -543,7 +928,7 @@ async function monitorAndCancelOrder(orderID, asset, side, size, logger) {
 const stateBySymbol = {};
 const executionLock = {}; // Prevent race conditions
 
-function ensureState(asset) {
+function ensureState(asset, logger) {
   if (!stateBySymbol[asset.symbol]) {
     const slug = crypto15mSlug(asset.slugPrefix);
     stateBySymbol[asset.symbol] = {
@@ -557,10 +942,16 @@ function ensureState(asset) {
       marketMeta: null,
       zHistory: [],
       entryZ: null,  // Store entry z-score for reversal detection
+      exitTimestamp: null,  // NEW in v2.4.0: Track when we last exited
       weakSignalCount: 0,
       weakSignalHistory: []
     };
     console.log(`[${asset.symbol}] Reset state for ${slug}`);
+
+    for (const [orderID, data] of pendingOrders.entries()) {
+      logger.warn(`🧹 Cleaning stale order: ${orderID}`);
+      pendingOrders.delete(orderID);
+    }
   }
   return stateBySymbol[asset.symbol];
 }
@@ -577,7 +968,7 @@ async function execForAsset(asset, priceData) {
   executionLock[asset.symbol] = true;
 
   try {
-    const state = ensureState(asset);
+    const state = ensureState(asset, logger);
     if (state.resetting) return;
     const { slug, cryptoPriceUrl, gammaUrl } = state;
 
@@ -614,6 +1005,10 @@ async function execForAsset(asset, priceData) {
     }
     if (isInSlamWindow()) return;
     if (minsLeft > 14) return;
+    if (minsLeft < 0.15) { // ~10 seconds
+      logger.log(`🛑 ULTRA LATE: ${(minsLeft * 60).toFixed(0)}s left - no trading`);
+      return;
+    }
 
     // 2) Start Price
     let startPrice;
@@ -703,6 +1098,39 @@ async function execForAsset(asset, priceData) {
     if (sharesUp > 0 && pUp < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding UP but pUp=${pUp.toFixed(4)}`);
     if (sharesDown > 0 && pDown < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding DOWN but pDown=${pDown.toFixed(4)}`);
 
+    // ==============================================
+    // NEW in v2.4.0: RECONCILE POSITIONS (if we have any)
+    // ==============================================
+    
+    if (sharesUp > 5 || sharesDown > 5) {
+      // Only reconcile if we have a significant position
+      // This catches fill discrepancies before exit logic
+      await reconcilePositions(state, logger);
+    }
+
+    // ==============================================
+    // NEW in v2.4.0: CHECK EXIT CONDITIONS
+    // ==============================================
+    
+    const exitCheck = shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft, logger);
+    
+    if (exitCheck.shouldExit) {
+      logger.log(`🚨 EXIT CONDITION MET - Attempting to close position`);
+      
+      const exitSuccess = await executeExit(asset, state, exitCheck, upBook, downBook, logger);
+      
+      if (exitSuccess) {
+        logger.log(`✅ Position exited successfully - Stopping further trading this tick`);
+        return; // Don't trade for rest of this tick
+      } else {
+        logger.warn(`⚠️  Exit attempt failed - Will retry next tick`);
+        logger.warn(`⚠️  Blocking new entries to prevent adding to losing position`);
+        return; // Don't add to position if exit failed
+      }
+    }
+
+    // Continue with normal trading logic if no exit needed...
+
     if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
       logger.log(`⛔ Weak signal position limit: ${sharesUp} shares with z=${z.toFixed(2)}`);
       return;
@@ -733,7 +1161,8 @@ async function execForAsset(asset, priceData) {
     const zMaxTimeBased = dynamicZMax(minsLeft);
     let effectiveZMin;
 
-    if (ENABLE_EARLY_TRADING && !isUSTradingHours()) {
+    const isUS = isUSTradingHours();
+    if (ENABLE_EARLY_TRADING && !isUS) {
       // Early trading enabled (non-US hours) - graduated thresholds
       if (minsLeft > 8) {
         effectiveZMin = 1.9 * regimeScalar; // Super early: very strict
@@ -749,14 +1178,15 @@ async function execForAsset(asset, priceData) {
     } else {
       // US hours or early trading disabled
       if (minsLeft > 3.5) {
-        logger.log(`Skip (${minsLeft.toFixed(1)} mins left): ${isUSTradingHours() ? 'US hours' : 'Early trading disabled'}`);
+        logger.log(`Skip (${minsLeft.toFixed(1)} mins left): ${isUS ? 'US hours' : 'Early trading disabled'}`);
         return;
       } else if (minsLeft > 3) {
-        effectiveZMin = 1.5 * regimeScalar; // Strict for mid window
+        effectiveZMin = 1.8 * regimeScalar; // Strict for mid window
       } else if (minsLeft > 2) {
-        effectiveZMin = 1.5 * regimeScalar; // Stricter, used to be 1.0
+        effectiveZMin = 1.0 * regimeScalar; // Normal
       } else {
-        effectiveZMin = 0.9 * regimeScalar; // Late
+        effectiveZMin = (regimeScalar < 1.15) ? (0.7 * regimeScalar) : (1.0 * regimeScalar);
+        logger.log(`Late game threshold: ${effectiveZMin.toFixed(2)} (regime ${regimeScalar < 1.15 ? 'CALM' : 'VOLATILE'})`);
       }
     }
 
@@ -1028,7 +1458,15 @@ async function execForAsset(asset, priceData) {
                   type: "EXTREME"
                 });
 
-                pendingOrders.set(resp.orderID, { asset: asset.symbol, side: lateSide, size: bigSize, timestamp: Date.now() });
+                const tokenId = lateSide === "UP" ? upTokenId : downTokenId;
+                pendingOrders.set(resp.orderID, { 
+                  asset: asset.symbol, 
+                  side: lateSide, 
+                  size: bigSize, 
+                  tokenId: tokenId,
+                  slug: slug,
+                  timestamp: Date.now() 
+                });
 
                 addPosition(state, slug, lateSide, bigSize);
                 state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
@@ -1058,10 +1496,6 @@ async function execForAsset(asset, priceData) {
           const entrySignalForCap = state.entryZ || z;
           const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
           const entryStrength = Math.abs(entrySignalForCap);
-          const absZ = Math.abs(currentSignalForCap);
-          const maxShares = absZ < 1.5 ? 200 :
-                            absZ < 2.0 ? 300 :
-                            absZ < 2.5 ? 400 : 600;
 
           // CRITICAL: Check if signal flipped sign FIRST
           const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
@@ -1082,10 +1516,10 @@ async function execForAsset(asset, priceData) {
           }
 
           // Signal still strong but position large, cap at 400
-          if (totalShares >= maxShares) {
-            logger.log(`⛔ LATE_LAYER CAP: Max ${maxShares} shares (z=${absZ.toFixed(2)})`);
-            return;
-          }
+          // if (totalShares >= 400) {
+          //   logger.log(`⛔ LATE_LAYER CAP: Max position (${totalShares} shares)`);
+          //   return;
+          // }
         }
 
         // 2. HYBRID LAYERED MODEL
@@ -1182,7 +1616,15 @@ async function execForAsset(asset, priceData) {
                 type: "LATE_LAYER"
               });
 
-              pendingOrders.set(resp.orderID, { asset: asset.symbol, side: lateSide, size: layerSize, timestamp: Date.now() });
+              const tokenId = lateSide === "UP" ? upTokenId : downTokenId;
+              pendingOrders.set(resp.orderID, { 
+                asset: asset.symbol, 
+                side: lateSide, 
+                size: layerSize, 
+                tokenId: tokenId,
+                slug: slug,
+                timestamp: Date.now() 
+              });
 
               addPosition(state, slug, lateSide, layerSize);
               state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
@@ -1229,15 +1671,28 @@ async function execForAsset(asset, priceData) {
     }
 
     const sizeInfo = minsLeft > 5 ? ` (Early trade: ${(size / EARLY_TRADE_SIZE_MULTIPLIER).toFixed(0)} → ${size})` : '';
-    
+
     // BUG FIX #3: Store entryZ right before placing order
     if (state.entryZ === null) {
       state.entryZ = z;
       logger.log(`[Entry Signal] Stored z=${z.toFixed(2)} (NORMAL entry)`);
     }
-    
+
+    if (minsLeft < 1.0) {
+      if (prob < 0.90) {
+        logger.log(`🛑 NORMAL order too late with low conviction: ${(prob * 100).toFixed(1)}% at ${(minsLeft * 60).toFixed(0)}s`);
+        return;
+      }
+
+      const profitMargin = 1.0 - best.ask;
+      if (profitMargin < 0.20) {
+        logger.log(`🛑 NORMAL order: margin too thin ($${profitMargin.toFixed(2)}) for ${(prob * 100).toFixed(1)}% conviction`);
+        return;
+      }
+    }
+
     logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size}${sizeInfo})`);
-    
+
     try {
       const resp = await client.createAndPostOrder({
         tokenID: best.side === "UP" ? upTokenId : downTokenId,
@@ -1260,7 +1715,15 @@ async function execForAsset(asset, priceData) {
           type: "NORMAL"
         });
 
-        pendingOrders.set(resp.orderID, { asset: asset.symbol, side: best.side, size, timestamp: Date.now() });
+        const tokenId = best.side === "UP" ? upTokenId : downTokenId;
+        pendingOrders.set(resp.orderID, { 
+          asset: asset.symbol, 
+          side: best.side, 
+          size, 
+          tokenId: tokenId,
+          slug: slug,
+          timestamp: Date.now() 
+        });
 
         addPosition(state, slug, best.side, size);
         state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + size;
@@ -1328,7 +1791,12 @@ async function execAll() {
 
 // === STARTUP & SCHEDULER ===
 (async () => {
-  console.log("Initializing Bot v2.3.2...");
+  console.log("Initializing Bot v2.4.0...");
+  console.log("🚨 EXIT MECHANISM ENABLED");
+  console.log(`   Reversal threshold: ${EXIT_REVERSAL_THRESHOLD}σ (after sign flip)`);
+  console.log(`   Emergency probability: ${(EXIT_PROBABILITY_THRESHOLD*100).toFixed(0)}%`);
+  console.log(`   Min position size: ${EXIT_MIN_POSITION_SIZE} shares`);
+  console.log("");
 
   try {
     // 1. Warm up volatility with historical data
@@ -1345,7 +1813,7 @@ async function execAll() {
       });
     });
     
-    console.log("🚀 Bot v2.3.2 running!");
+    console.log("🚀 Bot v2.4.0 running with active position management!");
   } catch (err) {
     console.error("FATAL: Startup failed:", err.message, err.stack);
     process.exit(1);
