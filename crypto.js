@@ -1,3 +1,7 @@
+// Version 2.4.1 - CRITICAL BUG FIXES
+// FIXED: Exit blocked by stale Data API (prevented $282 SOL loss)
+// FIXED: <30s exit threshold lowered to 1.2σ (prevented $86 ETH loss)
+//
 // Version 2.4.0 - Exit Mechanism & Position Management
 // Key Changes from 2.3.2:
 // - NEW: Exit mechanism for positions when signals reverse (CRITICAL FEATURE)
@@ -405,21 +409,21 @@ function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft
     return { shouldExit: false };
   }
 
-  // Don't exit in final 30 seconds (too late, just let it expire)
   if (minsLeft < 0.5) {
-    // Still allow emergency exits if reversal is HUGE (>2σ)
-    const entryZ = state.entryZ || 0;
-    const reversalMagnitude = Math.abs(z - entryZ);
-    const signalFlipped = Math.sign(entryZ) !== Math.sign(z) && 
-                          Math.sign(entryZ) !== 0 && 
-                          Math.sign(z) !== 0;
+    const entrySignal = state.entryZ || 0;
+    const currentSignal = z;
+    const reversalMagnitude = Math.abs(currentSignal - entrySignal);
+    const signalFlipped = Math.sign(entrySignal) !== Math.sign(currentSignal) && 
+                          Math.sign(entrySignal) !== 0 && 
+                          Math.sign(currentSignal) !== 0;
 
-    if (!(signalFlipped && reversalMagnitude > 2.0)) {
-      logger.log(`⏰ <30s left: only extreme reversals (>2σ) can exit`);
+    // Allow exit if reversal >1.2σ (50% higher than normal to account for exit costs)
+    if (!(signalFlipped && reversalMagnitude > 1.2)) {
+      logger.log(`⏰ <30s left: only large reversals (>1.2σ) allowed, current: ${reversalMagnitude.toFixed(2)}σ`);
       return { shouldExit: false };
     }
 
-    logger.log(`🚨 EMERGENCY: Extreme reversal ${reversalMagnitude.toFixed(2)}σ with <30s left`);
+    logger.log(`🚨 ULTRA-LATE EXIT: Reversal ${reversalMagnitude.toFixed(2)}σ with ${(minsLeft*60).toFixed(0)}s left`);
     // Allow exit to continue...
   }
   
@@ -655,50 +659,84 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
   // Must query Data API to get real position
   // ========================================
   
-  logger.log(`🔍 Verifying actual position before exit...`);
-  
+  logger.log(`🔍 Verifying actual position before exit...`); 
   const actualPositions = await getActualPositions(
     FUNDER, // The funder address from config
     tokenIds,
     logger
   );
   
-  if (!actualPositions) {
-    logger.error(`❌ Cannot verify position - aborting exit for safety`);
-    return false;
-  }
-  
   const trackedShares = shares;
-  const actualShares = side === 'UP' ? actualPositions.UP : actualPositions.DOWN;
+  let sharesToExit = trackedShares; // Default to tracked
   
-  // Check for discrepancy between tracked and actual
-  if (Math.abs(actualShares - trackedShares) > 5) {
-    logger.warn(`⚠️  POSITION MISMATCH DETECTED!`);
-    logger.warn(`   Tracked: ${trackedShares} ${side}`);
-    logger.warn(`   Actual:  ${actualShares} ${side}`);
-    logger.warn(`   Difference: ${trackedShares - actualShares} shares (${((Math.abs(trackedShares - actualShares)) / Math.max(trackedShares, 1) * 100).toFixed(1)}%)`);
-    
-    // Use actual shares for exit
-    exitDecision.shares = actualShares;
+  // Handle API failure - DON'T BLOCK EXIT
+  if (!actualPositions) {
+    logger.warn(`⚠️  Data API failed - proceeding with tracked position`);
+    logger.warn(`   Tracked: ${trackedShares} ${side} shares`);
+    logger.warn(`   Risk: May attempt to sell more than we have (exchange will reject gracefully)`);
+    // Continue with tracked shares - better to try and fail than not try at all
+    sharesToExit = trackedShares;
   } else {
-    logger.log(`✅ Position verified: ${actualShares} ${side} shares`);
+    // API returned data - verify it
+    const actualShares = side === 'UP' ? actualPositions.UP : actualPositions.DOWN;
+    
+    // Check for discrepancy
+    if (Math.abs(actualShares - trackedShares) > 5) {
+      logger.warn(`⚠️  POSITION MISMATCH DETECTED!`);
+      logger.warn(`   Tracked: ${trackedShares} ${side}`);
+      logger.warn(`   Actual:  ${actualShares} ${side}`);
+      logger.warn(`   Difference: ${trackedShares - actualShares} shares (${((Math.abs(trackedShares - actualShares)) / Math.max(trackedShares, 1) * 100).toFixed(1)}%)`);
+      
+      // Decision logic:
+      // 1. If actual > 0, use actual (API is correct, fills came in)
+      // 2. If actual = 0 but tracked > 20, trust tracked (API may be stale)
+      // 3. If both small, abort (likely already exited)
+      
+      if (actualShares > 0) {
+        logger.log(`   Using actual: ${actualShares} shares (API has real data)`);
+        sharesToExit = actualShares;
+      } else if (actualShares === 0 && trackedShares >= 20) {
+        logger.warn(`   ⚠️  CRITICAL: API shows 0 but tracked is ${trackedShares} - API likely stale!`);
+        logger.warn(`   Proceeding with tracked position (better to try than skip)`);
+        logger.warn(`   If this fails, exchange will reject gracefully`);
+        sharesToExit = trackedShares;
+      } else {
+        // Both are small or actual=0 and tracked<20
+        logger.warn(`⚠️  Both actual (${actualShares}) and tracked (${trackedShares}) small - likely already exited`);
+        
+        // Update state to match reality
+        if (side === 'UP') {
+          state.sideSharesBySlug[slug].UP = actualShares;
+        } else {
+          state.sideSharesBySlug[slug].DOWN = actualShares;
+        }
+        
+        return false;
+      }
+    } else {
+      logger.log(`✅ Position verified: ${actualShares} ${side} shares`);
+      sharesToExit = actualShares;
+    }
   }
   
-  // Don't exit if actual position too small
-  if (actualShares < EXIT_MIN_POSITION_SIZE) {
-    logger.warn(`⚠️  Actual position too small to exit: ${actualShares} shares (min ${EXIT_MIN_POSITION_SIZE})`);
+  // Final check: only abort if position is truly tiny
+  if (sharesToExit < EXIT_MIN_POSITION_SIZE) {
+    logger.warn(`⚠️  Position too small to exit: ${sharesToExit} shares (min ${EXIT_MIN_POSITION_SIZE})`);
     
-    // Update state to match reality
+    // Update state
     if (side === 'UP') {
-      state.sideSharesBySlug[slug].UP = actualShares;
+      state.sideSharesBySlug[slug].UP = sharesToExit;
     } else {
-      state.sideSharesBySlug[slug].DOWN = actualShares;
+      state.sideSharesBySlug[slug].DOWN = sharesToExit;
     }
     
     return false;
   }
   
-  // Continue with exit using ACTUAL shares
+  // Update exitDecision with final share count
+  exitDecision.shares = sharesToExit;
+  
+  // Continue with exit using determined shares
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
   const orderBook = side === 'UP' ? upBook : downBook;
   
@@ -718,11 +756,11 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
     // Normal: 1 tick below best bid for fast fill
     sellPrice = Math.max(0.01, Math.min(0.99, bestBid - 0.01));
   }
-  
-  const expectedRecovery = actualShares * sellPrice; // Use actual shares!
-  
+
+  const expectedRecovery = sharesToExit * sellPrice;
+
   logger.log(`🚨 EXECUTING EXIT`);
-  logger.log(`   Selling: ${actualShares} ${side} shares @ $${sellPrice.toFixed(2)}`);
+  logger.log(`   Selling: ${sharesToExit} ${side} shares @ $${sellPrice.toFixed(2)}`);
   logger.log(`   Reason: ${reason} | Urgency: ${urgency}`);
   logger.log(`   Expected recovery: $${expectedRecovery.toFixed(2)}`);
   
@@ -731,7 +769,7 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
       tokenID: tokenId,
       price: sellPrice.toFixed(2),
       side: Side.SELL,  // CRITICAL: Use SELL not BUY
-      size: actualShares, // CRITICAL: Use actual shares, not tracked!
+      size: sharesToExit,
       expiration: String(Math.floor(Date.now()/1000) + 300) // 5 min expiry
     }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
     
@@ -745,13 +783,13 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
         orderID: resp.orderID,
         side: side,
         price: sellPrice,
-        size: actualShares,
+        size: sharesToExit,
         type: "EXIT",
         reason: reason,
         urgency: urgency,
         expectedRecovery: expectedRecovery,
         trackedShares: trackedShares,
-        actualShares: actualShares
+        actualShares: sharesToExit
       });
       
       // Update position to zero (we sold entire position)
@@ -1892,7 +1930,7 @@ async function execAll() {
 
 // === STARTUP & SCHEDULER ===
 (async () => {
-  console.log("Initializing Bot v2.4.0...");
+  console.log("Initializing Bot v2.4.1...");
   console.log("🚨 EXIT MECHANISM ENABLED");
   console.log(`   Reversal threshold: ${EXIT_REVERSAL_THRESHOLD}σ (after sign flip)`);
   console.log(`   Emergency probability: ${(EXIT_PROBABILITY_THRESHOLD*100).toFixed(0)}%`);
@@ -1914,7 +1952,7 @@ async function execAll() {
       });
     });
     
-    console.log("🚀 Bot v2.4.0 running with active position management!");
+    console.log("🚀 Bot v2.4.1 running with active position management!");
   } catch (err) {
     console.error("FATAL: Startup failed:", err.message, err.stack);
     process.exit(1);
