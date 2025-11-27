@@ -1607,6 +1607,10 @@ async function execForAsset(asset, priceData) {
           target = Math.max(0.01, Math.min(target, 0.99));
 
           // Do not use this for now
+          // Max price check commented out - in practice LATE_LAYER only runs when:
+          // 1. minsLeft < 2 (very late, prices are naturally high), OR
+          // 2. absZ > zMaxTimeBased (huge signal justifies any price)
+          // So this check is redundant - expensive prices with lots of time don't occur in LATE_LAYER
           // const maxPrice = getMaxPriceForTime(minsLeft);
           // if (target > maxPrice) {
           //   logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
@@ -1635,6 +1639,10 @@ async function execForAsset(asset, priceData) {
             logger.log(`Late layer ${i}: size <= 0, skipping.`);
             continue;
           }
+
+          // Risk/reward check only applies for early LATE_LAYER entries (>3 mins)
+          // Late game LATE_LAYER (<3 mins) has higher confidence - trust the strategy
+          // This allows profitable 99¢ trades at 1-2 mins with 99%+ probability
           if (minsLeft > MINUTES_LEFT && !checkRiskReward(target, layerSize, sideProb, minsLeft, logger)) {
             logger.log(`Layer ${i}: skip, risk/reward too poor`);
             continue;
