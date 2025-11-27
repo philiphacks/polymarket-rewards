@@ -884,7 +884,7 @@ function isUSTradingHours(date = new Date()) {
   
   // Only Monday-Friday (1-5), not weekends (0, 6)
   const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
-  const isInTimeRange = totalMins >= 13 * 60 + 45 && totalMins < 19 * 60 + 45;
+  const isInTimeRange = totalMins >= 13 * 60 + 45 && totalMins < 20 * 60 + 30;
   
   return isWeekday && isInTimeRange;
 }
