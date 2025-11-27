@@ -1,6 +1,6 @@
 ================================================================================
 MONEYTRON TRADING METRICS REPORT
-Generated: 2025-11-27T19:42:52.061Z
+Generated: 2025-11-27T22:57:56.270Z
 Analysis Period: Last 14 days
 ================================================================================
 
@@ -8,8 +8,8 @@ Analysis Period: Last 14 days
 📊 EXIT MECHANISM EFFECTIVENESS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Total Exits Attempted: 5
-Successful: 5 (100.0%)
+Total Exits Attempted: 6
+Successful: 6 (100.0%)
 Target: >80%
 
 Average Recovery: 31.8%
@@ -23,41 +23,41 @@ Status: ❌ NEEDS IMPROVEMENT
 
 0-2 MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 2724 trades | Win Rate: 96.5% | Target: 65% | ✅
-  Wins: 2628 | Losses: 96 | Confidence: HIGH
-  PnL: $5022.60 | Avg: $1.84
+Overall: 2850 trades | Win Rate: 96.6% | Target: 65% | ✅
+  Wins: 2754 | Losses: 96 | Confidence: HIGH
+  PnL: $5385.20 | Avg: $1.89
 
-  US Hours:     153 trades | Win Rate:  96.7% | ✅
-  Non-US Hours: 2571 trades | Win Rate:  96.5% | ✅
-  Gap: 0.3% ✅
+  US Hours:     219 trades | Win Rate:  97.7% | ✅
+  Non-US Hours: 2631 trades | Win Rate:  96.5% | ✅
+  Gap: 1.2% ✅
 
 2-3 MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 1939 trades | Win Rate: 92.6% | Target: 60% | ✅
-  Wins: 1795 | Losses: 144 | Confidence: HIGH
-  PnL: $1124.80 | Avg: $0.58
+Overall: 2114 trades | Win Rate: 93.1% | Target: 60% | ✅
+  Wins: 1968 | Losses: 146 | Confidence: HIGH
+  PnL: $1392.30 | Avg: $0.66
 
-  US Hours:     119 trades | Win Rate:  94.1% | ✅
-  Non-US Hours: 1820 trades | Win Rate:  92.5% | ✅
-  Gap: 1.6% ✅
+  US Hours:     217 trades | Win Rate:  95.9% | ✅
+  Non-US Hours: 1897 trades | Win Rate:  92.8% | ✅
+  Gap: 3.1% ✅
 
 3-5 MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 2035 trades | Win Rate: 98.2% | Target: 55% | ✅
-  Wins: 1998 | Losses: 37 | Confidence: HIGH
-  PnL: $2366.80 | Avg: $1.16
+Overall: 2054 trades | Win Rate: 98.2% | Target: 55% | ✅
+  Wins: 2017 | Losses: 37 | Confidence: HIGH
+  PnL: $2422.00 | Avg: $1.18
 
-  US Hours:     41  trades | Win Rate:  85.4% | ✅
-  Non-US Hours: 1994 trades | Win Rate:  98.4% | ✅
-  Gap: 13.1% ⚠️
+  US Hours:     46  trades | Win Rate:  87.0% | ✅
+  Non-US Hours: 2008 trades | Win Rate:  98.5% | ✅
+  Gap: 11.5% ⚠️
 
 5-10 MINS
 ────────────────────────────────────────────────────────────────────────────────
-Overall: 2103 trades | Win Rate: 97.6% | Target: 50% | ✅
-  Wins: 2052 | Losses: 51 | Confidence: HIGH
-  PnL: $888.40 | Avg: $0.42
+Overall: 2138 trades | Win Rate: 97.6% | Target: 50% | ✅
+  Wins: 2087 | Losses: 51 | Confidence: HIGH
+  PnL: $960.60 | Avg: $0.45
 
-  Non-US Hours only: 2103 trades | Win Rate: 97.6%
+  Non-US Hours only: 2138 trades | Win Rate: 97.6%
 
 10+ MINS
 ────────────────────────────────────────────────────────────────────────────────
