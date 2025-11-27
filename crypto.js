@@ -1218,8 +1218,10 @@ async function execForAsset(asset, priceData) {
     const isUS = isUSTradingHours();
     if (ENABLE_EARLY_TRADING && !isUS) {
       // Early trading enabled (non-US hours) - graduated thresholds
-      if (minsLeft > 8) {
-        effectiveZMin = 1.9 * regimeScalar; // Super early: very strict
+      if (minsLeft > 10) {
+        effectiveZMin = 2.2 * regimeScalar; // Super early: very strict
+      } else if (minsLeft > 8) {
+        effectiveZMin = 1.9 * regimeScalar; // Kinda early: still strict
       } else if (minsLeft > 5) {
         effectiveZMin = 1.6 * regimeScalar; // Very early: strict
       } else if (minsLeft > 3) {
