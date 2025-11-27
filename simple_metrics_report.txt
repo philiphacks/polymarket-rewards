@@ -1,6 +1,6 @@
 ================================================================================
 MONEYTRON SIMPLE METRICS REPORT
-Generated: 2025-11-27T19:33:03.031Z
+Generated: 2025-11-27T23:16:55.019Z
 Analysis Period: Last 14 days
 ================================================================================
 
@@ -8,28 +8,28 @@ Analysis Period: Last 14 days
 📊 TRADING ACTIVITY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Total Entry Orders: 9217
-Orders Per Day: 658.4
-Recent 24h: 2206
-Recent 7d: 9217
+Total Entry Orders: 9572
+Orders Per Day: 683.7
+Recent 24h: 2214
+Recent 7d: 9572
 
-Total Invested: $385808.60
-Avg per Order: $41.86
+Total Invested: $402581.10
+Avg per Order: $42.06
 
 Order Types:
-  LATE_LAYER: 7592 (82.4%)
-  NORMAL: 1623 (17.6%)
+  LATE_LAYER: 7879 (82.3%)
+  NORMAL: 1691 (17.7%)
   EXTREME: 2 (0.0%)
 
 Trading Sessions:
-  US Hours: 313 (3.4%)
-  Non-US Hours: 532 (96.6%)
+  US Hours: 482 (5.0%)
+  Non-US Hours: 718 (95.0%)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📏 POSITION SIZING
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Total Shares: 406120
+Total Shares: 423690
 Average Size: 44
 Median Size: 50
 Min: 10 | Max: 150
@@ -38,15 +38,15 @@ Min: 10 | Max: 150
 🚨 EXIT MECHANISM
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Total Exits: 5
+Total Exits: 6
 Estimated Success Rate: 85.0%
-Average Recovery: 27.8%
+Average Recovery: 28.4%
 
-Total Recovered: $55.55
-Total at Risk: $199.85
+Total Recovered: $67.55
+Total at Risk: $237.85
 
 Exit Reasons:
-  signal_reversal: 5
+  signal_reversal: 6
 
 Status: ⚠️  NEEDS MORE DATA
 
@@ -59,7 +59,7 @@ Ready for Next Phase: ❌ NO
 
 Assessment:
   ❌ Exit mechanism not meeting thresholds
-     Recovery: 27.8% (need >50%)
+     Recovery: 28.4% (need >50%)
 
 Next Steps:
   1. Continue monitoring exit performance

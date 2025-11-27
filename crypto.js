@@ -1455,7 +1455,7 @@ async function execForAsset(asset, priceData) {
     
     // Asset-specific adjustments
     if (asset.symbol === "SOL") {
-      dynamicMinEdge += 0.02;
+      dynamicMinEdge += 0.01;
     }
 
     logger.log(`Min Edge Required: ${dynamicMinEdge.toFixed(4)} (Scalar: ${regimeScalar.toFixed(2)})`);
@@ -1640,9 +1640,9 @@ async function execForAsset(asset, priceData) {
         const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
 
         let edgePenalty = 0;
-        if (asset.symbol === "SOL") {
-          edgePenalty += 0.015;
-        }
+        // if (asset.symbol === "SOL") {
+        //   edgePenalty += 0.015;
+        // }
 
         if (sideProb < 0.90) {
           edgePenalty += 0.03;
