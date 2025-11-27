@@ -1059,10 +1059,6 @@ async function execForAsset(asset, priceData) {
     }
     if (isInSlamWindow()) return;
     if (minsLeft > 14) return;
-    if (minsLeft < 0.15) { // ~10 seconds
-      logger.log(`🛑 ULTRA LATE: ${(minsLeft * 60).toFixed(0)}s left - no trading`);
-      return;
-    }
 
     // 2) Start Price
     let startPrice;
@@ -1183,8 +1179,12 @@ async function execForAsset(asset, priceData) {
       }
     }
 
-    // Continue with normal trading logic if no exit needed...
+    if (minsLeft < 0.15) { // ~10 seconds
+      logger.log(`🛑 ULTRA LATE: ${(minsLeft * 60).toFixed(0)}s left - no trading`);
+      return;
+    }
 
+    // Continue with normal trading logic if no exit needed...
     if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
       logger.log(`⛔ Weak signal position limit: ${sharesUp} shares with z=${z.toFixed(2)}`);
       return;
