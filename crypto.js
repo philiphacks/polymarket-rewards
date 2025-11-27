@@ -1005,7 +1005,7 @@ async function execForAsset(asset, priceData) {
     }
     if (isInSlamWindow()) return;
     if (minsLeft > 14) return;
-    if (minsLeft < 0.17) { // 10 seconds
+    if (minsLeft < 0.15) { // ~10 seconds
       logger.log(`🛑 ULTRA LATE: ${(minsLeft * 60).toFixed(0)}s left - no trading`);
       return;
     }
