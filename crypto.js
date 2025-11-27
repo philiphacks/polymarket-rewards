@@ -1606,10 +1606,10 @@ async function execForAsset(asset, priceData) {
             logger.log(`Late layer ${i}: size <= 0, skipping.`);
             continue;
           }
-          if (minsLeft > MINUTES_LEFT && !checkRiskReward(target, layerSize, minsLeft, logger)) {
-            logger.log(`Layer ${i}: skip, risk/reward too poor`);
-            continue;
-          }
+          // if (minsLeft > MINUTES_LEFT && !checkRiskReward(target, layerSize, minsLeft, logger)) {
+          //   logger.log(`Layer ${i}: skip, risk/reward too poor`);
+          //   continue;
+          // }
 
           const capCheck = canPlaceOrder(state, slug, lateSide, layerSize, asset.symbol);
           const corrCheck = checkCorrelationRisk(state, asset.symbol, lateSide, layerSize);
