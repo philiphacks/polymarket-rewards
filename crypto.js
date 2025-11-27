@@ -828,6 +828,8 @@ function logTickSnapshot(snapshot) {
 function logOrderAttempt(orderData) {
   try {
     const filename = `orders-${new Date().toISOString().slice(0,10)}.jsonl`;
+    const isUSHours = isUSTradingHours(new Date(orderData.ts));
+    orderData.session = isUSHours ? 'US' : 'NON-US';
     fs.appendFile(filename, JSON.stringify(orderData) + "\n", (err) => { 
       if (err) console.error("[ORDER-LOG] Failed:", err); 
     });
