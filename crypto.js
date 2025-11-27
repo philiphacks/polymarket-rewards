@@ -1243,7 +1243,7 @@ async function execForAsset(asset, priceData) {
         logger.log(`Skip (${minsLeft.toFixed(1)} mins left): ${isUS ? 'US hours' : 'Early trading disabled'}`);
         return;
       } else if (minsLeft > 3) {
-        effectiveZMin = 1.8 * regimeScalar; // Strict for mid window
+        effectiveZMin = 1.6 * regimeScalar; // Down from 1.8, strict for mid window
       } else if (minsLeft > 2) {
         effectiveZMin = 1.0 * regimeScalar; // Normal
       } else {
