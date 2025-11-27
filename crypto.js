@@ -407,7 +407,20 @@ function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft
   
   // Don't exit in final 30 seconds (too late, just let it expire)
   if (minsLeft < 0.5) {
-    return { shouldExit: false };
+    // Still allow emergency exits if reversal is HUGE (>2σ)
+    const entryZ = state.entryZ || 0;
+    const reversalMagnitude = Math.abs(z - entryZ);
+    const signalFlipped = Math.sign(entryZ) !== Math.sign(z) && 
+                          Math.sign(entryZ) !== 0 && 
+                          Math.sign(z) !== 0;
+    
+    if (!(signalFlipped && reversalMagnitude > 2.0)) {
+      logger.log(`⏰ <30s left: only extreme reversals (>2σ) can exit`);
+      return { shouldExit: false };
+    }
+    
+    logger.log(`🚨 EMERGENCY: Extreme reversal ${reversalMagnitude.toFixed(2)}σ with <30s left`);
+    // Allow exit to continue...
   }
   
   // EXIT CONDITION 1: Signal Reversal
