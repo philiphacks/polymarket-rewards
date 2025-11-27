@@ -60,6 +60,16 @@ const BASIS_BUFFER_BPS = {
   XRP: 7
 };
 
+const MAX_PRICE_BY_TIME = {
+  5: 0.90,   // >5 mins
+  3: 0.93,   // 3-5 mins
+  2: 0.95,   // 2-3 mins
+  1: 0.96,   // 1-2 mins
+  0.5: 0.97, // 30s-1 min
+  0: 0.98    // <30s
+};
+const MAX_RISK_REWARD_RATIO = 15;
+
 const MAX_SHARES_PER_MARKET = { BTC: 600, ETH: 300, SOL: 300, XRP: 200 };
 
 const ASSET_SPECIFIC_KELLY_FRACTION = {
@@ -331,6 +341,29 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   }
   
   return { safe: true, reason: "No clear signal" };
+}
+
+function getMaxPriceForTime(minsLeft) {
+  if (minsLeft > 5) return MAX_PRICE_BY_TIME[5];
+  if (minsLeft > 3) return MAX_PRICE_BY_TIME[3];
+  if (minsLeft > 2) return MAX_PRICE_BY_TIME[2];
+  if (minsLeft > 1) return MAX_PRICE_BY_TIME[1];
+  if (minsLeft > 0.5) return MAX_PRICE_BY_TIME[0.5];
+  return MAX_PRICE_BY_TIME[0];
+}
+
+function checkRiskReward(price, size, minsLeft, logger) {
+  const reward = size * (1.00 - price);
+  const risk = size * price;
+  const ratio = risk / reward;
+
+  if (ratio > MAX_RISK_REWARD_RATIO) {
+    logger.log(`🛑 Risk/reward: ${ratio.toFixed(1)}:1 > ${MAX_RISK_REWARD_RATIO}:1 max`);
+    logger.log(`   Risking $${risk.toFixed(2)} to win $${reward.toFixed(2)}`);
+    return false;
+  }
+
+  return true;
 }
 
 // ========================================
@@ -1543,6 +1576,11 @@ async function execForAsset(asset, priceData) {
         for (let i = 0; i < LAYER_OFFSETS.length; i++) {
           let target = sideAsk + LAYER_OFFSETS[i];
           target = Math.max(0.01, Math.min(target, 0.99));
+          const maxPrice = getMaxPriceForTime(minsLeft);
+          if (target > maxPrice) {
+            logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+            continue;
+          }
 
           const ev = sideProb - target;
           let minEv = LAYER_MIN_EV[i];
@@ -1564,6 +1602,10 @@ async function execForAsset(asset, priceData) {
           const layerSize = sizeForTrade(ev, minsLeft, { minEdgeOverride: 0.0, riskBand: layerRiskBand });
           if (layerSize <= 0) {
             logger.log(`Late layer ${i}: size <= 0, skipping.`);
+            continue;
+          }
+          if (!checkRiskReward(target, layerSize, minsLeft, logger)) {
+            logger.log(`Layer ${i}: skip, risk/reward too poor`);
             continue;
           }
 
@@ -1676,6 +1718,16 @@ async function execForAsset(asset, priceData) {
     if (state.entryZ === null) {
       state.entryZ = z;
       logger.log(`[Entry Signal] Stored z=${z.toFixed(2)} (NORMAL entry)`);
+    }
+
+    const maxPrice = getMaxPriceForTime(minsLeft);
+    if (best.ask > maxPrice) {
+      logger.log(`🛑 Price ${best.ask.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+      return;
+    }
+
+    if (!checkRiskReward(best.ask, size, minsLeft, logger)) {
+      return;
     }
 
     if (minsLeft < 1.0) {
