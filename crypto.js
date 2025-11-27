@@ -867,7 +867,13 @@ function isInSlamWindow(date = new Date()) {
 
 function isUSTradingHours(date = new Date()) {
   const totalMins = date.getUTCHours() * 60 + date.getUTCMinutes();
-  return totalMins >= 13 * 60 + 45 && totalMins < 19 * 60 + 45;
+  const dayOfWeek = date.getUTCDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
+  
+  // Only Monday-Friday (1-5), not weekends (0, 6)
+  const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+  const isInTimeRange = totalMins >= 13 * 60 + 45 && totalMins < 19 * 60 + 45;
+  
+  return isWeekday && isInTimeRange;
 }
 
 // Logging
