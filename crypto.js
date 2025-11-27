@@ -1161,7 +1161,8 @@ async function execForAsset(asset, priceData) {
     const zMaxTimeBased = dynamicZMax(minsLeft);
     let effectiveZMin;
 
-    if (ENABLE_EARLY_TRADING && !isUSTradingHours()) {
+    const isUS = isUSTradingHours();
+    if (ENABLE_EARLY_TRADING && !isUS) {
       // Early trading enabled (non-US hours) - graduated thresholds
       if (minsLeft > 8) {
         effectiveZMin = 1.9 * regimeScalar; // Super early: very strict
@@ -1177,14 +1178,15 @@ async function execForAsset(asset, priceData) {
     } else {
       // US hours or early trading disabled
       if (minsLeft > 3.5) {
-        logger.log(`Skip (${minsLeft.toFixed(1)} mins left): ${isUSTradingHours() ? 'US hours' : 'Early trading disabled'}`);
+        logger.log(`Skip (${minsLeft.toFixed(1)} mins left): ${isUS ? 'US hours' : 'Early trading disabled'}`);
         return;
       } else if (minsLeft > 3) {
         effectiveZMin = 1.8 * regimeScalar; // Strict for mid window
       } else if (minsLeft > 2) {
         effectiveZMin = 1.0 * regimeScalar; // Normal
       } else {
-        effectiveZMin = 0.7 * regimeScalar; // Late
+        effectiveZMin = (regimeScalar < 1.15) ? (0.7 * regimeScalar) : (1.0 * regimeScalar);
+        logger.log(`Late game threshold: ${effectiveZMin.toFixed(2)} (regime ${regimeScalar < 1.15 ? 'CALM' : 'VOLATILE'})`);
       }
     }
 
