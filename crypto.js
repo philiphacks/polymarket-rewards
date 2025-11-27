@@ -1606,7 +1606,7 @@ async function execForAsset(asset, priceData) {
             logger.log(`Late layer ${i}: size <= 0, skipping.`);
             continue;
           }
-          if (minsLeft > 2.0 && !checkRiskReward(target, layerSize, minsLeft, logger)) {
+          if (minsLeft > MINUTES_LEFT && !checkRiskReward(target, layerSize, minsLeft, logger)) {
             logger.log(`Layer ${i}: skip, risk/reward too poor`);
             continue;
           }
