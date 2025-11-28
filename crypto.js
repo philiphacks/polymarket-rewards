@@ -1648,21 +1648,6 @@ async function execForAsset(asset, priceData) {
         
         const totalShares = sharesUp + sharesDown;
         if (totalShares >= 200) {
-          if ((lateSide === 'UP' && sharesUp >= 200) || 
-              (lateSide === 'DOWN' && sharesDown >= 200)) {
-            
-            // Only allow if price is very good (relative to probability)
-            const edgeRequired = MIN_EDGE_EARLY; // Need 3% edge with large position
-            const ev = sideProb - sideAsk;
-            
-            if (ev < edgeRequired) {
-              logger.log(`⛔ LATE_LAYER: ${totalShares} shares already, need ${(edgeRequired*100).toFixed(1)}% edge (have ${(ev*100).toFixed(1)}%)`);
-              return;
-            }
-            
-            logger.log(`✅ Large position but edge ${(ev*100).toFixed(1)}% justifies additional layer`);
-          }
-
           if (state.entryZ !== null) {
             const entrySignalForCap = state.entryZ;
             const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
