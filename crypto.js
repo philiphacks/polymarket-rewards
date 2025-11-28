@@ -1493,7 +1493,7 @@ async function execForAsset(asset, priceData) {
     let candidates = [];
     if (z >= effectiveZMin && upAsk) {
       const evBuyUp = pUp - upAsk;
-      logger.log(`Up ask=${upAsk.toFixed(3)}, EV buy Up=${evBuyUp.toFixed(4)}`);
+      logger.log(`Up ask=${upAsk.toFixed(3)}, pUp=${pUp}, EV buy Up=${evBuyUp.toFixed(4)}`);
       candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
     } else {
       logger.log(`We don't buy Up here (z=${z.toFixed(3)} < ${effectiveZMin.toFixed(2)} or no ask).`);
@@ -1501,7 +1501,7 @@ async function execForAsset(asset, priceData) {
 
     if (z <= -effectiveZMin && downAsk) {
       const evBuyDown = pDown - downAsk;
-      logger.log(`Down ask=${downAsk.toFixed(3)}, EV buy Down=${evBuyDown.toFixed(4)}`);
+      logger.log(`Down ask=${downAsk.toFixed(3)}, pDown=${pDown}, EV buy Down=${evBuyDown.toFixed(4)}`);
       candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
     } else {
       logger.log(`We don't buy Down here (z=${z.toFixed(3)} > ${-effectiveZMin.toFixed(2)} or no ask).`);
