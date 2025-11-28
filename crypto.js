@@ -113,12 +113,6 @@ const MAX_SHARES_WEAK_SIGNAL = 70;
 const REGIME_SCALAR_MIN = 0.7; // Don't make thresholds too high in low vol
 const REGIME_SCALAR_MAX = 1.4; // Don't make thresholds too low in high vol
 
-// Limits for dynamicZMax (time-based momentum filter)
-const Z_MAX_FAR_MINUTES = 6;
-const Z_MAX_NEAR_MINUTES = 3;
-const Z_MAX_FAR = 2.5;
-const Z_MAX_NEAR = 1.7;
-
 // Extreme late-game constants
 const Z_HUGE = 2.8; // Requires ~99.7% probability
 const LATE_GAME_EXTREME_SECS = 8;
@@ -862,14 +856,6 @@ function getTimeDecayFactor(minsLeft) {
   return 1.0 + t * 0.4; // 1.0 -> 1.4
 }
 
-// Time-based momentum filter
-function dynamicZMax(minsLeft) {
-  if (minsLeft >= Z_MAX_FAR_MINUTES) return Z_MAX_FAR;
-  if (minsLeft <= Z_MAX_NEAR_MINUTES) return Z_MAX_NEAR;
-  const t = (Z_MAX_FAR_MINUTES - minsLeft) / (Z_MAX_FAR_MINUTES - Z_MAX_NEAR_MINUTES);
-  return Z_MAX_FAR - t * (Z_MAX_FAR - Z_MAX_NEAR);
-}
-
 function canPlaceOrder(state, slug, side, size, assetSymbol) {
   const totalCap = MAX_SHARES_PER_MARKET[assetSymbol] || 500;
   const totalBefore = state.sharesBoughtBySlug[slug] || 0;
@@ -1286,7 +1272,6 @@ async function execForAsset(asset, priceData) {
     // ==============================================
     
     const absZ = Math.abs(z);
-    const zMaxTimeBased = dynamicZMax(minsLeft);
     let effectiveZMin;
 
     const isUS = isUSTradingHours();
@@ -1532,7 +1517,7 @@ async function execForAsset(asset, priceData) {
     // ============================================================
     // LATE GAME MODE (SIGNAL-AWARE)
     // ============================================================
-    if (absZ > zMaxTimeBased || minsLeft < 2) {
+    if (minsLeft < 2) {
       // ==============================================
       // Signal-Aware LATE_LAYER
       // Check if signal has reversed since entry
