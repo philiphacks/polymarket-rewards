@@ -1632,7 +1632,8 @@ async function execForAsset(asset, priceData) {
 
         // 2. HYBRID LAYERED MODEL
         const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
-        const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
+        // const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
+        const LAYER_MIN_EV = [0.003, 0.002, 0.001, 0.000];
 
         let edgePenalty = 0;
         // if (asset.symbol === "SOL") {
@@ -1640,7 +1641,7 @@ async function execForAsset(asset, priceData) {
         // }
 
         if (sideProb < 0.90) {
-          edgePenalty += 0.03;
+          edgePenalty += 0.015;
         }
 
         logger.log(
