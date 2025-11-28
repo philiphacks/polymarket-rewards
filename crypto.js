@@ -1100,6 +1100,10 @@ async function execForAsset(asset, priceData) {
     if (minsLeft < 0.01) {
       state.resetting = true;
       logger.log(`Interval over. Resetting...`);
+
+      state.sharesBoughtBySlug[slug] = 0;
+      logger.log(`✅ Market expired - reset bought counter to 0`);
+
       await sleep(30_000);
       stateBySymbol[asset.symbol] = null;
       return;
