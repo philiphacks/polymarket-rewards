@@ -799,7 +799,7 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
       // Clear entry Z since we've exited the position
       state.entryZ = null;
       state.exitTimestamp = Date.now();
-      
+
       return true;
     }
   } catch (err) {
