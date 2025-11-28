@@ -1780,8 +1780,7 @@ async function execForAsset(asset, priceData) {
 
         for (let i = 0; i < LAYER_OFFSETS.length; i++) {
           let target = sideAsk + LAYER_OFFSETS[i];
-          const timeBasedMax = minsLeft < 2 ? LATE_GAME_MAX_PRICE : 0.99;
-          target = Math.max(0.01, Math.min(target, timeBasedMax));
+          target = Math.max(0.01, Math.min(target, LATE_GAME_MAX_PRICE));
 
           // Only checked for early LATE_LAYER (>3 mins) - prevents expensive bets with lots of reversal time
           // Late game LATE_LAYER (<3 mins) has no max price cap - trust the proven signal
@@ -1796,11 +1795,6 @@ async function execForAsset(asset, priceData) {
           //     continue;
           //   }
           // }
-          if (minsLeft < 2 && target > LATE_GAME_MAX_PRICE) {
-            logger.log(`⛔ Layer ${i}: ${(target*100).toFixed(0)}¢ > 95¢ max at ${(minsLeft*60).toFixed(0)}s left`);
-            logger.log(`   Final-minute gamma risk too high for expensive entries`);
-            continue;
-          }
 
           const ev = sideProb - target;
           let minEv = LAYER_MIN_EV[i];
