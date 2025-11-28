@@ -1242,20 +1242,6 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
-      logger.log(`⚠️  Weak signal position limit: ${sharesUp} UP shares`);
-      // Only allow DOWN (hedge)
-      candidates = candidates.filter(c => c.side === 'DOWN');
-      if (candidates.length === 0) return;
-    }
-
-    if (z < 0 && z > -0.8 && sharesDown >= MAX_SHARES_WEAK_SIGNAL) {
-      logger.log(`⚠️  Weak signal position limit: ${sharesDown} DOWN shares`);
-      // Only allow UP (hedge)
-      candidates = candidates.filter(c => c.side === 'UP');
-      if (candidates.length === 0) return;
-    }
-
     // Log Snapshot
     logTickSnapshot({
       ts: Date.now(), symbol: asset.symbol, slug, minsLeft,
@@ -1475,6 +1461,20 @@ async function execForAsset(asset, priceData) {
       
       return c.ev > required;
     });
+
+    if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
+      logger.log(`⚠️  Weak signal position limit: ${sharesUp} UP shares`);
+      // Only allow DOWN (hedge)
+      candidates = candidates.filter(c => c.side === 'DOWN');
+      if (candidates.length === 0) return;
+    }
+
+    if (z < 0 && z > -0.8 && sharesDown >= MAX_SHARES_WEAK_SIGNAL) {
+      logger.log(`⚠️  Weak signal position limit: ${sharesDown} DOWN shares`);
+      // Only allow UP (hedge)
+      candidates = candidates.filter(c => c.side === 'UP');
+      if (candidates.length === 0) return;
+    }
 
     // ============================================================
     // LATE GAME MODE (SIGNAL-AWARE)
