@@ -1223,27 +1223,27 @@ async function execForAsset(asset, priceData) {
     if (sharesUp > 0 && pUp < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding UP but pUp=${pUp.toFixed(4)}`);
     if (sharesDown > 0 && pDown < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding DOWN but pDown=${pDown.toFixed(4)}`);
 
-    if (!state.liquidityHistory) state.liquidityHistory = [];
-
-    const currentLiquidity = {
-      upDepth: upBook.asks?.reduce((sum, o) => sum + Number(o.size), 0) || 0,
-      downDepth: downBook.asks?.reduce((sum, o) => sum + Number(o.size), 0) || 0,
-      ts: Date.now()
-    };
-
-    state.liquidityHistory.push(currentLiquidity);
-    state.liquidityHistory = state.liquidityHistory.filter(l => Date.now() - l.ts < 30000);
-
     // Detect rapid liquidity drain (early warning signal)
-    if (state.liquidityHistory.length >= 3) {
-      const oldest = state.liquidityHistory[0];
-      const current = currentLiquidity;
+    // if (!state.liquidityHistory) state.liquidityHistory = [];
 
-      if (z > 0 && current.upDepth < oldest.upDepth * 0.5) {
-        logger.log(`⚠️  LIQUIDITY ALERT: UP depth dropped ${((1 - current.upDepth/oldest.upDepth)*100).toFixed(0)}% in 30s`);
-        logger.log(`   This suggests strong buying pressure - consider early entry`);
-      }
-    }
+    // const currentLiquidity = {
+    //   upDepth: upBook.asks?.reduce((sum, o) => sum + Number(o.size), 0) || 0,
+    //   downDepth: downBook.asks?.reduce((sum, o) => sum + Number(o.size), 0) || 0,
+    //   ts: Date.now()
+    // };
+
+    // state.liquidityHistory.push(currentLiquidity);
+    // state.liquidityHistory = state.liquidityHistory.filter(l => Date.now() - l.ts < 30000);
+
+    // if (state.liquidityHistory.length >= 3) {
+    //   const oldest = state.liquidityHistory[0];
+    //   const current = currentLiquidity;
+
+    //   if (z > 0 && current.upDepth < oldest.upDepth * 0.5) {
+    //     logger.log(`⚠️  LIQUIDITY ALERT: UP depth dropped ${((1 - current.upDepth/oldest.upDepth)*100).toFixed(0)}% in 30s`);
+    //     logger.log(`   This suggests strong buying pressure - consider early entry`);
+    //   }
+    // }
 
     // ==============================================
     // NEW in v2.4.0: RECONCILE POSITIONS (if we have any)
