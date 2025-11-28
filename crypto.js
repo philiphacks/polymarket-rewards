@@ -1833,7 +1833,7 @@ async function execForAsset(asset, priceData) {
     if (prob >= PROB_MIN_CORE && best.ask >= PRICE_MIN_CORE) riskBand = "core";
     else if (prob <= PROB_MAX_RISKY && best.ask <= PRICE_MAX_RISKY) riskBand = "risky";
 
-    const size = sizeForTrade(best.ev, minsLeft, { riskBand });
+    const size = sizeForTrade(best.ev, minsLeft, { riskBand, minEdgeOverride: dynamicMinEdge });
     if (size <= 0) { 
       logger.log(`EV>0 but size=0`); 
       return; 
