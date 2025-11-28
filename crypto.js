@@ -1634,8 +1634,8 @@ async function execForAsset(asset, priceData) {
       }
 
       if (lateSide) {
-        if (minsLeft < 2 && limitPrice > LATE_GAME_MAX_PRICE) {
-          logger.log(`⛔ LATE GAME: ${(limitPrice*100).toFixed(0)}¢ > 95¢ max`);
+        if (minsLeft < 2 && sideAsk > LATE_GAME_MAX_PRICE) {
+          logger.log(`⛔ LATE GAME: ${(sideAsk*100).toFixed(0)}¢ > 95¢ max`);
           logger.log(`   ${asset.symbol}: Too close to expiry for expensive bets`);
           return;
         }
