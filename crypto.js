@@ -1665,7 +1665,7 @@ async function execForAsset(asset, priceData) {
           let minEv = LAYER_MIN_EV[i];
 
           if (regimeScalar < 1.2) {
-            minEv *= 0.6;
+            minEv *= 0.5;
           }
           const finalMinEv = minEv + edgePenalty;
 
