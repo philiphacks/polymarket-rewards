@@ -1056,7 +1056,8 @@ function ensureState(asset, logger) {
       entryZ: null,  // Store entry z-score for reversal detection
       exitTimestamp: null,  // NEW in v2.4.0: Track when we last exited
       weakSignalCount: 0,
-      weakSignalHistory: []
+      weakSignalHistory: [],
+      liquidityHistory: [],
     };
     console.log(`[${asset.symbol}] Reset state for ${slug}`);
 
@@ -1205,6 +1206,28 @@ async function execForAsset(asset, priceData) {
 
     if (sharesUp > 0 && pUp < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding UP but pUp=${pUp.toFixed(4)}`);
     if (sharesDown > 0 && pDown < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding DOWN but pDown=${pDown.toFixed(4)}`);
+
+    if (!state.liquidityHistory) state.liquidityHistory = [];
+
+    const currentLiquidity = {
+      upDepth: upBook.asks?.reduce((sum, o) => sum + Number(o.size), 0) || 0,
+      downDepth: downBook.asks?.reduce((sum, o) => sum + Number(o.size), 0) || 0,
+      ts: Date.now()
+    };
+
+    state.liquidityHistory.push(currentLiquidity);
+    state.liquidityHistory = state.liquidityHistory.filter(l => Date.now() - l.ts < 30000);
+
+    // Detect rapid liquidity drain (early warning signal)
+    if (state.liquidityHistory.length >= 3) {
+      const oldest = state.liquidityHistory[0];
+      const current = currentLiquidity;
+
+      if (z > 0 && current.upDepth < oldest.upDepth * 0.5) {
+        logger.log(`⚠️  LIQUIDITY ALERT: UP depth dropped ${((1 - current.upDepth/oldest.upDepth)*100).toFixed(0)}% in 30s`);
+        logger.log(`   This suggests strong buying pressure - consider early entry`);
+      }
+    }
 
     // ==============================================
     // NEW in v2.4.0: RECONCILE POSITIONS (if we have any)
@@ -1425,6 +1448,7 @@ async function execForAsset(asset, priceData) {
     }
 
     // 7) Trade Logic - Directional
+    // EXPERIMENT: Keep track
     if (state.zHistory.length >= 3) {
       const recent = state.zHistory.slice(-3);
       const timeSpan = (recent[2].ts - recent[0].ts) / 1000; // seconds
@@ -1433,14 +1457,16 @@ async function execForAsset(asset, priceData) {
 
       // Predict where z will be in 20 seconds
       const predictedZ = z + (zVelocity * 20);
+      const maxPrediction = Math.abs(z) + 2.0; // Can't predict more than +2σ from current
+      const cappedPredictedZ = Math.sign(predictedZ) * Math.min(Math.abs(predictedZ), maxPrediction);
 
-      logger.log(`💭 Prediction: z=${z.toFixed(2)}, velocity=${zVelocity.toFixed(3)}/s, predicted20s=${predictedZ.toFixed(2)}`);
+      logger.log(`💭 Prediction: z=${z.toFixed(2)}, velocity=${zVelocity.toFixed(3)}/s, predicted20s=${predictedZ.toFixed(2)}${predictedZ !== cappedPredictedZ ? ` (capped to ${cappedPredictedZ.toFixed(2)})` : ''}`);
       
       // Lower threshold if strong upward trajectory
       const minVelocity = 0.05; // Must be moving at least 0.05 z-score per second 
-      if (Math.abs(predictedZ) > 2.0 && 
-          Math.sign(predictedZ) === Math.sign(z) && 
-          Math.abs(zVelocity) > minVelocity) {  // ← ADD THIS
+      if (Math.abs(cappedPredictedZ) > 2.0 &&
+          Math.sign(cappedPredictedZ) === Math.sign(z) &&
+          Math.abs(zVelocity) > minVelocity) {
         const originalZMin = effectiveZMin;
         effectiveZMin *= 0.7;
         logger.log(`📈 Strong trajectory detected: threshold ${originalZMin.toFixed(2)} → ${effectiveZMin.toFixed(2)}`);
@@ -1557,7 +1583,12 @@ async function execForAsset(asset, priceData) {
 
       const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
       const secsLeft = minsLeft * 60;
-      const pReq = requiredLateProb(secsLeft);
+      let pReq = requiredLateProb(secsLeft);
+      if (Math.abs(cappedPredictedZ) > 2.5 && Math.abs(zVelocity) > 0.05) {
+        const originalPReq = pReq;
+        pReq *= 0.95; // 5% easier (85% → 80.75%)
+        logger.log(`📈 LATE_LAYER trajectory: pReq ${originalPReq.toFixed(3)} → ${pReq.toFixed(3)}`);
+      }
 
       let lateSide = null, sideProb = 0, sideAsk = 0;
 
