@@ -1159,7 +1159,7 @@ async function execForAsset(asset, priceData) {
     const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
 
     // Include drift in z-score calculation
-    const z = (currentPrice - startPrice - drift * minsLeft) / sigmaT;
+    const z = (currentPrice - startPrice + drift * minsLeft) / sigmaT;
     if (!state.zHistory) state.zHistory = [];
     state.zHistory.push({ z, ts: Date.now() });
     state.zHistory = state.zHistory.filter(h => Date.now() - h.ts < 30000);
