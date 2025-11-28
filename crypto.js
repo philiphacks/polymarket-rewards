@@ -1449,19 +1449,21 @@ async function execForAsset(asset, priceData) {
 
     // 7) Trade Logic - Directional
     // EXPERIMENT: Keep track
+    let zVelocity = 0;
+    let cappedPredictedZ = z; // Default to current z
     if (state.zHistory.length >= 3) {
       const recent = state.zHistory.slice(-3);
       const timeSpan = (recent[2].ts - recent[0].ts) / 1000; // seconds
       const zChange = recent[2].z - recent[0].z;
-      const zVelocity = zChange / timeSpan;
+      zVelocity = zChange / timeSpan;
 
       // Predict where z will be in 20 seconds
       const predictedZ = z + (zVelocity * 20);
       const maxPrediction = Math.abs(z) + 2.0; // Can't predict more than +2σ from current
-      const cappedPredictedZ = Math.sign(predictedZ) * Math.min(Math.abs(predictedZ), maxPrediction);
+      cappedPredictedZ = Math.sign(predictedZ) * Math.min(Math.abs(predictedZ), maxPrediction);
 
       logger.log(`💭 Prediction: z=${z.toFixed(2)}, velocity=${zVelocity.toFixed(3)}/s, predicted20s=${predictedZ.toFixed(2)}${predictedZ !== cappedPredictedZ ? ` (capped to ${cappedPredictedZ.toFixed(2)})` : ''}`);
-      
+
       // Lower threshold if strong upward trajectory
       const minVelocity = 0.05; // Must be moving at least 0.05 z-score per second 
       if (Math.abs(cappedPredictedZ) > 2.0 &&
