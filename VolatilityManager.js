@@ -111,8 +111,10 @@ function getRealizedVolatility(symbol, currentPrice) {
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
   const stdDevReturns = Math.sqrt(variance); // This is % volatility
-  
+
   const calculatedSigmaUSD = currentPrice * stdDevReturns;
+
+  // console.log(`📊 Volatility: [${symbol}] Calculated=$${calculatedSigmaUSD.toFixed(2)}, Floor=$${dynamicFloorUSD.toFixed(2)}, Using=$${Math.max(calculatedSigmaUSD, dynamicFloorUSD).toFixed(2)}`);
 
   // Return the higher of Realized Vol or the BPS Floor
   return Math.max(calculatedSigmaUSD, dynamicFloorUSD);

@@ -120,7 +120,7 @@ const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.98;
 
 // Early trading size reduction (>5 mins left)
-const EARLY_TRADE_SIZE_MULTIPLIER = 0.4; // 40% of normal size for very early trades
+const EARLY_TRADE_SIZE_MULTIPLIER = 0.7; // 40% of normal size for very early trades
 
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
@@ -1148,16 +1148,16 @@ async function execForAsset(asset, priceData) {
     // 4) Volatility & Drift
     let rawSigmaPerMin = VolatilityManager.getRealizedVolatility(asset.symbol, currentPrice);
     const drift = estimateDrift(asset.symbol, 60);
-    
+
     const effectiveSigma = rawSigmaPerMin * getTimeDecayFactor(minsLeft);
     const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
-    
+
     // Regime scalar clamped to prevent extreme adjustments
     const rawRegimeScalar = Math.sqrt(volRatio);
     const regimeScalar = Math.max(REGIME_SCALAR_MIN, Math.min(REGIME_SCALAR_MAX, rawRegimeScalar));
 
     const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
-    
+
     // Include drift in z-score calculation
     const z = (currentPrice - startPrice - drift * minsLeft) / sigmaT;
     if (!state.zHistory) state.zHistory = [];
@@ -1474,7 +1474,7 @@ async function execForAsset(asset, priceData) {
           Math.sign(cappedPredictedZ) === Math.sign(z) &&
           Math.abs(zVelocity) > minVelocity) {
         const originalZMin = effectiveZMin;
-        effectiveZMin *= 0.7;
+        effectiveZMin *= 0.85;
         logger.log(`📈 Strong trajectory detected: threshold ${originalZMin.toFixed(2)} → ${effectiveZMin.toFixed(2)}`);
       }
     }
