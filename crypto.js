@@ -119,9 +119,6 @@ const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.95;
 
-// Early trading size reduction (>5 mins left)
-const EARLY_TRADE_SIZE_MULTIPLIER = 0.85;
-
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
 const PRICE_MAX_RISKY = 0.90; const PROB_MAX_RISKY  = 0.95;
@@ -960,11 +957,6 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
 
   let size = BASE_MIN + evNorm * (BASE_MAX - BASE_MIN);
   size = Math.round((size * timeFactor) / 10) * 10;
-  
-  // Apply early trading size reduction if >5 mins left
-  if (minsLeft > 5) {
-    size = Math.round((size * EARLY_TRADE_SIZE_MULTIPLIER) / 10) * 10;
-  }
   
   return Math.min(size, ABS_MAX);
 }
@@ -1930,8 +1922,6 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    const sizeInfo = minsLeft > 5 ? ` (Early trade: ${(size / EARLY_TRADE_SIZE_MULTIPLIER).toFixed(0)} → ${size})` : '';
-
     // BUG FIX #3: Store entryZ right before placing order
     if (state.entryZ === null) {
       state.entryZ = z;
@@ -1961,7 +1951,7 @@ async function execForAsset(asset, priceData) {
       }
     }
 
-    logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size}${sizeInfo})`);
+    logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size})`);
 
     try {
       const resp = await client.createAndPostOrder({
