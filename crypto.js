@@ -1430,16 +1430,19 @@ async function execForAsset(asset, priceData) {
       const timeSpan = (recent[2].ts - recent[0].ts) / 1000; // seconds
       const zChange = recent[2].z - recent[0].z;
       const zVelocity = zChange / timeSpan;
-      
+
       // Predict where z will be in 20 seconds
       const predictedZ = z + (zVelocity * 20);
-      
+
       logger.log(`💭 Prediction: z=${z.toFixed(2)}, velocity=${zVelocity.toFixed(3)}/s, predicted20s=${predictedZ.toFixed(2)}`);
       
       // Lower threshold if strong upward trajectory
-      if (Math.abs(predictedZ) > 2.0 && Math.sign(predictedZ) === Math.sign(z)) {
+      const minVelocity = 0.05; // Must be moving at least 0.05 z-score per second 
+      if (Math.abs(predictedZ) > 2.0 && 
+          Math.sign(predictedZ) === Math.sign(z) && 
+          Math.abs(zVelocity) > minVelocity) {  // ← ADD THIS
         const originalZMin = effectiveZMin;
-        effectiveZMin *= 0.7; // 30% easier entry if strong trajectory
+        effectiveZMin *= 0.7;
         logger.log(`📈 Strong trajectory detected: threshold ${originalZMin.toFixed(2)} → ${effectiveZMin.toFixed(2)}`);
       }
     }
