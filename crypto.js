@@ -1549,7 +1549,7 @@ async function execForAsset(asset, priceData) {
         sideAsk = downAsk || 0.99; 
       }
 
-      if (minsLeft < 2 && sideAsk > 0.85) {
+      if (minsLeft < 2 && minsLeft > 0.5 && sideAsk > 0.85) {
         const priceMargin = Math.abs(currentPrice - startPrice) / startPrice;
 
         if (priceMargin < 0.002) { // <0.2% margin
