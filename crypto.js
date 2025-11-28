@@ -104,6 +104,7 @@ const MIN_EDGE_EARLY = 0.03;
 const MIN_EDGE_LATE  = 0.02;
 
 // EARLY TRADING CONFIG (5-15 mins left)
+const OVERRIDE_US_TRADING_HOURS = true; // Toggle to trade early even during US hours
 const ENABLE_EARLY_TRADING = true; // Toggle this to enable/disable early trading
 const MAX_SHARES_WEAK_SIGNAL = 70;
 
@@ -924,7 +925,7 @@ function isUSTradingHours(date = new Date()) {
   const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
   const isInTimeRange = totalMins >= 13 * 60 + 45 && totalMins < 20 * 60 + 30;
   
-  return isWeekday && isInTimeRange;
+  return !OVERRIDE_US_TRADING_HOURS && isWeekday && isInTimeRange;
 }
 
 // Logging
