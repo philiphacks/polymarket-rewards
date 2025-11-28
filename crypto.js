@@ -1338,10 +1338,12 @@ async function execForAsset(asset, priceData) {
     // RESTORED: Low-Vol Boost
     // In calm markets, signals are more reliable → trade more aggressively
     // ==============================================
-    if (rawRegimeScalar < 1.15) {  // Trigger more often
-      const boost = rawRegimeScalar < 1.05 ? 0.80 : 0.85;
-      effectiveZMin *= boost;
-      logger.log(`[Low Vol Boost] ${(1-boost)*100}% easier (regime=${rawRegimeScalar.toFixed(2)})`);
+    if (rawRegimeScalar < 1.1) {
+      const LOW_VOL_BOOST = 0.85; // 15% easier in low vol
+      const oldThreshold = effectiveZMin;
+      effectiveZMin *= LOW_VOL_BOOST;
+
+      logger.log(`[Low Vol Regime] Threshold reduced: ${oldThreshold.toFixed(2)} → ${effectiveZMin.toFixed(2)} (${((1-LOW_VOL_BOOST)*100).toFixed(0)}% easier)`);
     }
 
     // Single gating check
