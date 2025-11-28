@@ -1227,6 +1227,7 @@ async function execForAsset(asset, priceData) {
       const exitSuccess = await executeExit(asset, state, exitCheck, upBook, downBook, logger);
       
       if (exitSuccess) {
+        state.weakSignalHistory = [];
         logger.log(`✅ Position exited successfully - Stopping further trading this tick`);
         return; // Don't trade for rest of this tick
       } else {
@@ -1601,6 +1602,21 @@ async function execForAsset(asset, priceData) {
         
         const totalShares = sharesUp + sharesDown;
         if (totalShares >= 200) {
+          if ((lateSide === 'UP' && sharesUp >= 200) || 
+              (lateSide === 'DOWN' && sharesDown >= 200)) {
+            
+            // Only allow if price is very good (relative to probability)
+            const edgeRequired = MIN_EDGE_EARLY; // Need 3% edge with large position
+            const ev = sideProb - sideAsk;
+            
+            if (ev < edgeRequired) {
+              logger.log(`⛔ LATE_LAYER: ${totalShares} shares already, need ${(edgeRequired*100).toFixed(1)}% edge (have ${(ev*100).toFixed(1)}%)`);
+              return;
+            }
+            
+            logger.log(`✅ Large position but edge ${(ev*100).toFixed(1)}% justifies additional layer`);
+          }
+
           const entrySignalForCap = state.entryZ || z;
           const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
           const entryStrength = Math.abs(entrySignalForCap);
@@ -1633,7 +1649,8 @@ async function execForAsset(asset, priceData) {
         // 2. HYBRID LAYERED MODEL
         const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
         // const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
-        const LAYER_MIN_EV = [0.003, 0.002, 0.001, 0.000];
+        // const LAYER_MIN_EV = [0.003, 0.002, 0.001, 0.001];
+        const LAYER_MIN_EV = [0.001, 0.002, 0.003, 0.005];
 
         let edgePenalty = 0;
         // if (asset.symbol === "SOL") {
