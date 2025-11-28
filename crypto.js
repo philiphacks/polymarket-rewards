@@ -1632,6 +1632,12 @@ async function execForAsset(asset, priceData) {
       }
 
       if (lateSide) {
+        const maxPriceByTime = minsLeft < 2 ? 0.95 : 0.98;
+        if (sideAsk > maxPriceByTime) {
+          logger.log(`⛔ ${lateSide}: Ask ${(sideAsk*100).toFixed(0)}¢ > max ${(maxPriceByTime*100).toFixed(0)}¢ at ${minsLeft.toFixed(1)}m`);
+          return;
+        }
+
         // 1. EXTREME SIGNAL - Kelly Criterion sizing
         let zHugeDynamic = Math.min(2.8, Z_HUGE * regimeScalar); // Capped at 2.8
         
