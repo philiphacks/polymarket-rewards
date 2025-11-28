@@ -1460,7 +1460,7 @@ async function execForAsset(asset, priceData) {
       const cProb = c.side === "UP" ? pUp : pDown;
       
       if (cProb < 0.90) {
-        required = Math.max(required, 0.05);
+        required = Math.max(required, 0.03); // Down from 0.05
       }
       
       return c.ev > required;
