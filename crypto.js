@@ -1515,10 +1515,10 @@ async function execForAsset(asset, priceData) {
           // Signal increased >50% in last 30 seconds?
           if (currentZ > oldestZ * 1.5 && oldestZ > 0.3) {
             const percentIncrease = ((currentZ - oldestZ) / oldestZ * 100);
-            
+
             logger.log(`⚠️  SIGNAL SPIKE DETECTED`);
             logger.log(`   z: ${oldestZ.toFixed(2)} → ${currentZ.toFixed(2)} (+${percentIncrease.toFixed(0)}%) in ${timeSpan.toFixed(0)}s`);
-            
+
             // Only block if we already have shares (prevents adding to spike)
             if (sharesUp + sharesDown > 0) {
               logger.log(`⛔ Skipping entry - spikes often reverse (mean reversion risk)`);
