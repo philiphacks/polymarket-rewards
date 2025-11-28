@@ -117,7 +117,7 @@ const REGIME_SCALAR_MAX = 1.4; // Don't make thresholds too low in high vol
 const Z_HUGE = 2.8; // Requires ~99.7% probability
 const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
-const LATE_GAME_MAX_PRICE = 0.98;
+const LATE_GAME_MAX_PRICE = 0.95;
 
 // Early trading size reduction (>5 mins left)
 const EARLY_TRADE_SIZE_MULTIPLIER = 0.7; // 40% of normal size for very early trades
@@ -1632,9 +1632,9 @@ async function execForAsset(asset, priceData) {
       }
 
       if (lateSide) {
-        const maxPriceByTime = minsLeft < 2 ? 0.95 : 0.98;
-        if (sideAsk > maxPriceByTime) {
-          logger.log(`⛔ ${lateSide}: Ask ${(sideAsk*100).toFixed(0)}¢ > max ${(maxPriceByTime*100).toFixed(0)}¢ at ${minsLeft.toFixed(1)}m`);
+        if (minsLeft < 2 && limitPrice > LATE_GAME_MAX_PRICE) {
+          logger.log(`⛔ LATE GAME: ${(limitPrice*100).toFixed(0)}¢ > 95¢ max`);
+          logger.log(`   ${asset.symbol}: Too close to expiry for expensive bets`);
           return;
         }
 
