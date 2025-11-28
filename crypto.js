@@ -1204,6 +1204,19 @@ async function execForAsset(asset, priceData) {
     const existingSide = getExistingSide(state, slug);
     logger.log(`Existing net side: ${existingSide || "FLAT"}`);
 
+    const pos = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
+    const totalBought = state.sharesBoughtBySlug[slug] || 0;
+    const netPosition = pos.UP - pos.DOWN;
+
+    logger.log(`📊 POSITION DEBUG:`);
+    logger.log(`   sideSharesBySlug[${slug}]: UP=${pos.UP}, DOWN=${pos.DOWN}`);
+    logger.log(`   sharesBoughtBySlug[${slug}]: ${totalBought}`);
+    logger.log(`   Net position: ${netPosition} (${netPosition > 0 ? 'UP' : netPosition < 0 ? 'DOWN' : 'FLAT'})`);
+    logger.log(`   Cap: ${totalBought}/${MAX_SHARES_PER_MARKET[asset.symbol]}`);
+
+    // Also log all slugs in state:
+    logger.log(`   All tracked slugs: ${Object.keys(state.sharesBoughtBySlug).join(', ')}`);
+
     const sharesUp = state.sideSharesBySlug[slug]?.UP || 0;
     const sharesDown = state.sideSharesBySlug[slug]?.DOWN || 0;
 
