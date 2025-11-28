@@ -637,6 +637,21 @@ async function reconcilePositions(state, logger) {
       if (shouldReconcile) {
         logger.log(`✅ Reconciling: ${reconcileReason}`);
         state.sideSharesBySlug[slug] = { UP: actual.UP, DOWN: actual.DOWN };
+
+        // 🔧 FIX: Also reconcile total bought counter
+        const newTotal = actual.UP + actual.DOWN;
+        const oldTotal = state.sharesBoughtBySlug[slug] || 0;
+
+        if (newTotal === 0 && oldTotal > 0) {
+          // Position is now zero, reset bought counter
+          state.sharesBoughtBySlug[slug] = 0;
+          logger.log(`✅ Position closed - reset bought counter ${oldTotal} → 0`);
+        } else if (newTotal !== oldTotal) {
+          // Partial reconciliation - adjust counter
+          state.sharesBoughtBySlug[slug] = newTotal;
+          logger.log(`✅ Bought counter reconciled ${oldTotal} → ${newTotal}`);
+        }
+
         logger.log(`✅ Positions reconciled to actual values`);
       }
     }
