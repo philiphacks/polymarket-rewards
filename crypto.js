@@ -1425,8 +1425,26 @@ async function execForAsset(asset, priceData) {
     }
 
     // 7) Trade Logic - Directional
-    let candidates = [];
+    if (state.zHistory.length >= 3) {
+      const recent = state.zHistory.slice(-3);
+      const timeSpan = (recent[2].ts - recent[0].ts) / 1000; // seconds
+      const zChange = recent[2].z - recent[0].z;
+      const zVelocity = zChange / timeSpan;
+      
+      // Predict where z will be in 20 seconds
+      const predictedZ = z + (zVelocity * 20);
+      
+      logger.log(`💭 Prediction: z=${z.toFixed(2)}, velocity=${zVelocity.toFixed(3)}/s, predicted20s=${predictedZ.toFixed(2)}`);
+      
+      // Lower threshold if strong upward trajectory
+      if (Math.abs(predictedZ) > 2.0 && Math.sign(predictedZ) === Math.sign(z)) {
+        const originalZMin = effectiveZMin;
+        effectiveZMin *= 0.7; // 30% easier entry if strong trajectory
+        logger.log(`📈 Strong trajectory detected: threshold ${originalZMin.toFixed(2)} → ${effectiveZMin.toFixed(2)}`);
+      }
+    }
 
+    let candidates = [];
     if (z >= effectiveZMin && upAsk) {
       const evBuyUp = pUp - upAsk;
       logger.log(`Up ask=${upAsk.toFixed(3)}, EV buy Up=${evBuyUp.toFixed(4)}`);
