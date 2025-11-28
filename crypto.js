@@ -1780,20 +1780,26 @@ async function execForAsset(asset, priceData) {
 
         for (let i = 0; i < LAYER_OFFSETS.length; i++) {
           let target = sideAsk + LAYER_OFFSETS[i];
-          target = Math.max(0.01, Math.min(target, 0.99));
+          const timeBasedMax = minsLeft < 2 ? LATE_GAME_MAX_PRICE : 0.99;
+          target = Math.max(0.01, Math.min(target, timeBasedMax));
 
           // Only checked for early LATE_LAYER (>3 mins) - prevents expensive bets with lots of reversal time
           // Late game LATE_LAYER (<3 mins) has no max price cap - trust the proven signal
-          const maxPrice = getMaxPriceForTime(minsLeft);
-          const isExtremeSignal = absZ > 2.2;
-          if (minsLeft > MINUTES_LEFT) {
-            if (isExtremeSignal) {
-              logger.log(`✅ Extreme signal (z=${absZ.toFixed(2)}) overrides max price at ${minsLeft.toFixed(1)}m`);
-              // Allow trading, skip max price check
-            } else if (target > maxPrice) {
-              logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
-              continue;
-            }
+          // const maxPrice = getMaxPriceForTime(minsLeft);
+          // const isExtremeSignal = absZ > 2.2;
+          // if (minsLeft > MINUTES_LEFT) {
+          //   if (isExtremeSignal) {
+          //     logger.log(`✅ Extreme signal (z=${absZ.toFixed(2)}) overrides max price at ${minsLeft.toFixed(1)}m`);
+          //     // Allow trading, skip max price check
+          //   } else if (target > maxPrice) {
+          //     logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+          //     continue;
+          //   }
+          // }
+          if (minsLeft < 2 && target > LATE_GAME_MAX_PRICE) {
+            logger.log(`⛔ Layer ${i}: ${(target*100).toFixed(0)}¢ > 95¢ max at ${(minsLeft*60).toFixed(0)}s left`);
+            logger.log(`   Final-minute gamma risk too high for expensive entries`);
+            continue;
           }
 
           const ev = sideProb - target;
