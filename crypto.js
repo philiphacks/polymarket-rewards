@@ -1721,9 +1721,15 @@ async function execForAsset(asset, priceData) {
           // Only checked for early LATE_LAYER (>3 mins) - prevents expensive bets with lots of reversal time
           // Late game LATE_LAYER (<3 mins) has no max price cap - trust the proven signal
           const maxPrice = getMaxPriceForTime(minsLeft);
-          if (minsLeft > MINUTES_LEFT && target > maxPrice) {
-            logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
-            continue;
+          const isExtremeSignal = absZ > 2.2;
+          if (minsLeft > MINUTES_LEFT) {
+            if (isExtremeSignal) {
+              logger.log(`✅ Extreme signal (z=${absZ.toFixed(2)}) overrides max price at ${minsLeft.toFixed(1)}m`);
+              // Allow trading, skip max price check
+            } else if (target > maxPrice) {
+              logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+              continue;
+            }
           }
 
           const ev = sideProb - target;
