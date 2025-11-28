@@ -1228,6 +1228,7 @@ async function execForAsset(asset, priceData) {
       
       if (exitSuccess) {
         state.weakSignalHistory = [];
+        state.weakSignalCount = 0;
         logger.log(`✅ Position exited successfully - Stopping further trading this tick`);
         return; // Don't trade for rest of this tick
       } else {
