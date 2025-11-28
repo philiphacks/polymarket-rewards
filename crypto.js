@@ -1503,7 +1503,7 @@ async function execForAsset(asset, priceData) {
         }
       }
 
-      if (state.zHistory && state.zHistory.length >= 3) {
+      if (minsLeft > 1.0 && state.zHistory && state.zHistory.length >= 3) {
         const recent30s = state.zHistory.filter(h => Date.now() - h.ts < 30000);
         
         if (recent30s.length >= 3) {
