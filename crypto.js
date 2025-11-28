@@ -120,7 +120,7 @@ const LATE_GAME_MIN_EV = 0.01;
 const LATE_GAME_MAX_PRICE = 0.95;
 
 // Early trading size reduction (>5 mins left)
-const EARLY_TRADE_SIZE_MULTIPLIER = 0.7; // 40% of normal size for very early trades
+const EARLY_TRADE_SIZE_MULTIPLIER = 0.85;
 
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
