@@ -1550,7 +1550,7 @@ async function execForAsset(asset, priceData) {
 
       if (minsLeft < 2 && sideAsk > 0.85) {
         const priceMargin = Math.abs(currentPrice - startPrice) / startPrice;
-        
+
         if (priceMargin < 0.002) { // <0.2% margin
           logger.log(`⛔ THIN MARGIN: Price only ${(priceMargin*100).toFixed(2)}% from strike`);
           logger.log(`   Current: $${currentPrice.toFixed(2)} | Strike: $${startPrice.toFixed(2)}`);
