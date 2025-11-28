@@ -1274,7 +1274,7 @@ async function execForAsset(asset, priceData) {
       } else if (minsLeft > 5) {
         effectiveZMin = 1.6 * regimeScalar; // Very early: strict
       } else if (minsLeft > 3) {
-        effectiveZMin = 1.3 * regimeScalar; // Mid early: moderate
+        effectiveZMin = 1.2 * regimeScalar; // Mid early: moderate
       } else if (minsLeft > 2) {
         effectiveZMin = 0.9 * regimeScalar; // Getting close: normal
       } else {
