@@ -1479,7 +1479,6 @@ async function execForAsset(asset, priceData) {
     // ============================================================
     // LATE GAME MODE (SIGNAL-AWARE)
     // ============================================================
-    
     if (absZ > zMaxTimeBased || minsLeft < 2) {
       // ==============================================
       // Signal-Aware LATE_LAYER
@@ -1547,6 +1546,17 @@ async function execForAsset(asset, priceData) {
         lateSide = "DOWN"; 
         sideProb = pDown; 
         sideAsk = downAsk || 0.99; 
+      }
+
+      if (minsLeft < 2 && sideAsk > 0.85) {
+        const priceMargin = Math.abs(currentPrice - startPrice) / startPrice;
+        
+        if (priceMargin < 0.002) { // <0.2% margin
+          logger.log(`⛔ THIN MARGIN: Price only ${(priceMargin*100).toFixed(2)}% from strike`);
+          logger.log(`   Current: $${currentPrice.toFixed(2)} | Strike: $${startPrice.toFixed(2)}`);
+          logger.log(`   Won't pay ${(sideAsk*100).toFixed(0)}¢ for risky late entry`);
+          return;
+        }
       }
 
       if (lateSide) {
