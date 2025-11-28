@@ -800,6 +800,12 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
       state.entryZ = null;
       state.exitTimestamp = Date.now();
 
+      const pos = state.sideSharesBySlug[slug];
+      if (pos.UP === 0 && pos.DOWN === 0) {
+        state.sharesBoughtBySlug[slug] = 0;
+        logger.log(`✅ Full exit - reset bought counter`);
+      }
+
       return true;
     }
   } catch (err) {
