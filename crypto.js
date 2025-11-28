@@ -65,6 +65,7 @@ const BASIS_BUFFER_BPS = {
 };
 
 const MAX_PRICE_BY_TIME = {
+  8: 0.86,
   5: 0.90,   // >5 mins
   3: 0.93,   // 3-5 mins
   2: 0.95,   // 2-3 mins
@@ -349,6 +350,7 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
 }
 
 function getMaxPriceForTime(minsLeft) {
+  if (minsLeft > 8) return MAX_PRICE_BY_TIME[8];
   if (minsLeft > 5) return MAX_PRICE_BY_TIME[5];
   if (minsLeft > 3) return MAX_PRICE_BY_TIME[3];
   if (minsLeft > 2) return MAX_PRICE_BY_TIME[2];
