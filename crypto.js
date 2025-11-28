@@ -1615,13 +1615,16 @@ async function execForAsset(asset, priceData) {
       }
 
       if (minsLeft < 2 && minsLeft > 0.5 && sideAsk > 0.85) {
-        const priceMargin = Math.abs(currentPrice - startPrice) / startPrice;
+        // Require price to be at least 0.5 sigma away from strike
+        const minDistanceRequired = 0.5 * rawSigmaPerMin * Math.sqrt(minsLeft);
+        const actualDistance = Math.abs(currentPrice - startPrice);
 
-        if (priceMargin < 0.002) { // <0.2% margin
-          logger.log(`⛔ THIN MARGIN: Price only ${(priceMargin*100).toFixed(2)}% from strike`);
-          logger.log(`   Current: $${currentPrice.toFixed(2)} | Strike: $${startPrice.toFixed(2)}`);
-          logger.log(`   Won't pay ${(sideAsk*100).toFixed(0)}¢ for risky late entry`);
+        if (actualDistance < minDistanceRequired) {
+          logger.log(`⛔ THIN MARGIN: $${actualDistance.toFixed(2)} < $${minDistanceRequired.toFixed(2)} (0.5σ at ${minsLeft.toFixed(1)}m)`);
+          logger.log(`   Too close to strike for expensive late entry`);
           return;
+        } else {
+          logger.log(`✅ Margin OK: $${actualDistance.toFixed(2)} > $${minDistanceRequired.toFixed(2)} (${(actualDistance/minDistanceRequired).toFixed(1)}σ)`);
         }
       }
 
