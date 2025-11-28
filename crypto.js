@@ -1305,7 +1305,13 @@ async function execForAsset(asset, priceData) {
       } else if (minsLeft > 8) {
         effectiveZMin = 1.9 * regimeScalar; // Kinda early: still strict
       } else if (minsLeft > 5) {
-        effectiveZMin = 1.6 * regimeScalar; // Very early: strict
+        // effectiveZMin = 1.6 * regimeScalar; // Very early: strict
+        const baseThreshold = regimeScalar < 1.2 ? 1.4 : 1.6;
+        effectiveZMin = baseThreshold * regimeScalar;
+
+        if (regimeScalar < 1.2) {
+          logger.log(`[Calm Market] Early threshold lowered: 1.6 → 1.4`);
+        }
       } else if (minsLeft > 3) {
         effectiveZMin = 1.2 * regimeScalar; // Mid early: moderate
       } else if (minsLeft > 2) {
