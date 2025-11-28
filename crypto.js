@@ -1242,15 +1242,18 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    // Continue with normal trading logic if no exit needed...
     if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
-      logger.log(`⛔ Weak signal position limit: ${sharesUp} shares with z=${z.toFixed(2)}`);
-      return;
+      logger.log(`⚠️  Weak signal position limit: ${sharesUp} UP shares`);
+      // Only allow DOWN (hedge)
+      candidates = candidates.filter(c => c.side === 'DOWN');
+      if (candidates.length === 0) return;
     }
 
     if (z < 0 && z > -0.8 && sharesDown >= MAX_SHARES_WEAK_SIGNAL) {
-      logger.log(`⛔ Weak signal position limit: ${sharesDown} shares with z=${z.toFixed(2)}`);
-      return;
+      logger.log(`⚠️  Weak signal position limit: ${sharesDown} DOWN shares`);
+      // Only allow UP (hedge)
+      candidates = candidates.filter(c => c.side === 'UP');
+      if (candidates.length === 0) return;
     }
 
     // Log Snapshot
@@ -1399,9 +1402,15 @@ async function execForAsset(asset, priceData) {
         
         // Large reversal (>1σ)?
         if (reversalMagnitude > 1.0) {
-          logger.log(`⚠️  SIGNAL REVERSAL: z=${oldZ.toFixed(2)} → ${newZ.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
-          logger.log(`⛔ EXIT: Large signal reversal, stopping all trading`);
-          return;
+          logger.log(`⚠️  SIGNAL REVERSAL: z=${oldZ.toFixed(2)} → ${newZ.toFixed(2)}`);
+
+          // Only block if we have position in OLD direction
+          if ((oldSign > 0 && sharesUp > 0) || (oldSign < 0 && sharesDown > 0)) {
+            logger.log(`⛔ Blocking: would add to losing ${oldSign > 0 ? 'UP' : 'DOWN'} position`);
+            return;
+          }
+
+          logger.log(`✅ Allowing reversal trade in ${newSign > 0 ? 'UP' : 'DOWN'} direction`);
         }
       }
     }
@@ -1477,21 +1486,47 @@ async function execForAsset(asset, priceData) {
       // Check if signal has reversed since entry
       // ==============================================
       
-      const entrySignal = state.entryZ || z;
-      const currentSignal = z;
+      if (state.entryZ !== null) {
+        const entrySignal = state.entryZ;
+        const currentSignal = z;
 
-      const signalFlipped = Math.sign(entrySignal) !== Math.sign(currentSignal) 
-                            && Math.sign(entrySignal) !== 0 
-                            && Math.sign(currentSignal) !== 0;
+        const signalFlipped = Math.sign(entrySignal) !== Math.sign(currentSignal) 
+                              && Math.sign(entrySignal) !== 0 
+                              && Math.sign(currentSignal) !== 0;
+        
+        const reversalMagnitude = Math.abs(currentSignal - entrySignal);
+        const largeReversal = reversalMagnitude > 1.0;
 
-      const reversalMagnitude = Math.abs(currentSignal - entrySignal);
-      
-      // BUG FIX #1: Lowered threshold from 1.5σ to 1.0σ to match main detector
-      const largeReversal = reversalMagnitude > 1.0;
+        if (signalFlipped && largeReversal) {
+          logger.log(`⛔ LATE_LAYER BLOCKED: Signal reversed ${entrySignal.toFixed(2)} → ${currentSignal.toFixed(2)}`);
+          return;
+        }
+      }
 
-      if (signalFlipped && largeReversal) {
-        logger.log(`⛔ LATE_LAYER BLOCKED: Signal reversed ${entrySignal.toFixed(2)} → ${currentSignal.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
-        return;
+      if (state.zHistory && state.zHistory.length >= 3) {
+        const recent30s = state.zHistory.filter(h => Date.now() - h.ts < 30000);
+        
+        if (recent30s.length >= 3) {
+          const oldestZ = Math.abs(recent30s[0].z);
+          const currentZ = Math.abs(z);
+          const timeSpan = (Date.now() - recent30s[0].ts) / 1000;
+          
+          // Signal increased >50% in last 30 seconds?
+          if (currentZ > oldestZ * 1.5 && oldestZ > 0.3) {
+            const percentIncrease = ((currentZ - oldestZ) / oldestZ * 100);
+            
+            logger.log(`⚠️  SIGNAL SPIKE DETECTED`);
+            logger.log(`   z: ${oldestZ.toFixed(2)} → ${currentZ.toFixed(2)} (+${percentIncrease.toFixed(0)}%) in ${timeSpan.toFixed(0)}s`);
+            
+            // Only block if we already have shares (prevents adding to spike)
+            if (sharesUp + sharesDown > 0) {
+              logger.log(`⛔ Skipping entry - spikes often reverse (mean reversion risk)`);
+              return;
+            }
+            
+            logger.log(`   Exception: No position yet, allowing cautious entry`);
+          }
+        }
       }
 
       // ==============================================
@@ -1617,26 +1652,28 @@ async function execForAsset(asset, priceData) {
             logger.log(`✅ Large position but edge ${(ev*100).toFixed(1)}% justifies additional layer`);
           }
 
-          const entrySignalForCap = state.entryZ || z;
-          const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
-          const entryStrength = Math.abs(entrySignalForCap);
+          if (state.entryZ !== null) {
+            const entrySignalForCap = state.entryZ;
+            const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
+            const entryStrength = Math.abs(entrySignalForCap);
 
-          // CRITICAL: Check if signal flipped sign FIRST
-          const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
+            // CRITICAL: Check if signal flipped sign FIRST
+            const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
 
-          if (!sameSign) {
-            // Signal reversed - always block regardless of magnitude
-            logger.log(`⛔ LATE_LAYER CAP: Signal reversed ${entrySignalForCap.toFixed(2)} → ${currentSignalForCap.toFixed(2)}`);
-            return;
-          }
+            if (!sameSign) {
+              // Signal reversed - always block regardless of magnitude
+              logger.log(`⛔ LATE_LAYER CAP: Signal reversed ${entrySignalForCap.toFixed(2)} → ${currentSignalForCap.toFixed(2)}`);
+              return;
+            }
 
-          // Same sign - check if weakening
-          const currentStrength = Math.abs(currentSignalForCap);
-          const signalWeakening = (entryStrength - currentStrength) / entryStrength;
+            // Same sign - check if weakening
+            const currentStrength = Math.abs(currentSignalForCap);
+            const signalWeakening = (entryStrength - currentStrength) / entryStrength;
 
-          if (signalWeakening > 0.3) {
-            logger.log(`⛔ LATE_LAYER CAP: Signal weakened ${(signalWeakening*100).toFixed(0)}% (${totalShares} shares)`);
-            return;
+            if (signalWeakening > 0.3) {
+              logger.log(`⛔ LATE_LAYER CAP: Signal weakened ${(signalWeakening*100).toFixed(0)}% (${totalShares} shares)`);
+              return;
+            }
           }
 
           // Signal still strong but position large, cap at 400
