@@ -100,8 +100,8 @@ const EXIT_MIN_POSITION_SIZE = 10; // Don't bother exiting positions smaller tha
 
 // Time / edge thresholds
 const MINUTES_LEFT = 3;
-const MIN_EDGE_EARLY = 0.05;
-const MIN_EDGE_LATE  = 0.03;
+const MIN_EDGE_EARLY = 0.03;
+const MIN_EDGE_LATE  = 0.02;
 
 // EARLY TRADING CONFIG (5-15 mins left)
 const ENABLE_EARLY_TRADING = true; // Toggle this to enable/disable early trading
@@ -1451,11 +1451,6 @@ async function execForAsset(asset, priceData) {
     // Low vol adjustment
     if (regimeScalar <= 1.1) {
       dynamicMinEdge = dynamicMinEdge * 0.6;
-    }
-    
-    // Asset-specific adjustments
-    if (asset.symbol === "SOL") {
-      dynamicMinEdge += 0.01;
     }
 
     logger.log(`Min Edge Required: ${dynamicMinEdge.toFixed(4)} (Scalar: ${regimeScalar.toFixed(2)})`);
