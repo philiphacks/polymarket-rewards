@@ -3,7 +3,7 @@ import readline from "readline";
 
 // ================= CONFIG =================
 const SLUGS_TO_EXTRACT = [
-  "eth-updown-15m-1764222300"
+  "sol-updown-15m-1764259200",
 ];
 
 const ORDER_FILES = [

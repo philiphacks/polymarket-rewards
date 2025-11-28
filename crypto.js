@@ -1,3 +1,7 @@
+// Version 2.4.1 - CRITICAL BUG FIXES
+// FIXED: Exit blocked by stale Data API (prevented $282 SOL loss)
+// FIXED: <30s exit threshold lowered to 1.2σ (prevented $86 ETH loss)
+//
 // Version 2.4.0 - Exit Mechanism & Position Management
 // Key Changes from 2.3.2:
 // - NEW: Exit mechanism for positions when signals reverse (CRITICAL FEATURE)
@@ -60,6 +64,16 @@ const BASIS_BUFFER_BPS = {
   XRP: 7
 };
 
+const MAX_PRICE_BY_TIME = {
+  5: 0.90,   // >5 mins
+  3: 0.93,   // 3-5 mins
+  2: 0.95,   // 2-3 mins
+  1: 0.96,   // 1-2 mins
+  0.5: 0.97, // 30s-1 min
+  0: 0.98    // <30s
+};
+const MAX_RISK_REWARD_RATIO = 15;
+
 const MAX_SHARES_PER_MARKET = { BTC: 600, ETH: 300, SOL: 300, XRP: 200 };
 
 const ASSET_SPECIFIC_KELLY_FRACTION = {
@@ -86,8 +100,8 @@ const EXIT_MIN_POSITION_SIZE = 10; // Don't bother exiting positions smaller tha
 
 // Time / edge thresholds
 const MINUTES_LEFT = 3;
-const MIN_EDGE_EARLY = 0.05;
-const MIN_EDGE_LATE  = 0.03;
+const MIN_EDGE_EARLY = 0.03;
+const MIN_EDGE_LATE  = 0.02;
 
 // EARLY TRADING CONFIG (5-15 mins left)
 const ENABLE_EARLY_TRADING = true; // Toggle this to enable/disable early trading
@@ -333,6 +347,50 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   return { safe: true, reason: "No clear signal" };
 }
 
+function getMaxPriceForTime(minsLeft) {
+  if (minsLeft > 5) return MAX_PRICE_BY_TIME[5];
+  if (minsLeft > 3) return MAX_PRICE_BY_TIME[3];
+  if (minsLeft > 2) return MAX_PRICE_BY_TIME[2];
+  if (minsLeft > 1) return MAX_PRICE_BY_TIME[1];
+  if (minsLeft > 0.5) return MAX_PRICE_BY_TIME[0.5];
+  return MAX_PRICE_BY_TIME[0];
+}
+
+function checkRiskReward(price, size, prob, minsLeft, logger) {
+  const reward = size * (1.00 - price);
+  const risk = size * price;
+  const ratio = risk / reward;
+
+  // Calculate probability-adjusted max ratio
+  // Higher probability = allow worse ratios
+  // At 50% prob: max 15:1
+  // At 90% prob: max 50:1
+  // At 99% prob: max 200:1
+
+  let maxRatio;
+  if (prob >= 0.95) {
+    // Very high probability: allow up to 100:1
+    maxRatio = 100;
+  } else if (prob >= 0.90) {
+    // High probability: allow up to 50:1
+    maxRatio = 50;
+  } else if (prob >= 0.80) {
+    // Medium-high: allow up to 25:1
+    maxRatio = 25;
+  } else {
+    // Lower probability: strict 15:1
+    maxRatio = 15;
+  }
+
+  if (ratio > maxRatio) {
+    logger.log(`🛑 Risk/reward: ${ratio.toFixed(1)}:1 > ${maxRatio.toFixed(1)}:1 max (prob=${(prob*100).toFixed(1)}%)`);
+    logger.log(`   Risking $${risk.toFixed(2)} to win $${reward.toFixed(2)}`);
+    return false;
+  }
+
+  return true;
+}
+
 // ========================================
 // EXIT LOGIC (NEW in v2.4.0)
 // ========================================
@@ -340,20 +398,33 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
 function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft, logger) {
   const entryZ = state.entryZ;
   const totalShares = sharesUp + sharesDown;
-  
+
   // No position or too small to bother
   if (totalShares < EXIT_MIN_POSITION_SIZE) {
     return { shouldExit: false };
   }
-  
+
   // No entry signal recorded (shouldn't happen but be safe)
   if (entryZ === null || entryZ === undefined) {
     return { shouldExit: false };
   }
-  
-  // Don't exit in final 30 seconds (too late, just let it expire)
+
   if (minsLeft < 0.5) {
-    return { shouldExit: false };
+    const entrySignal = state.entryZ || 0;
+    const currentSignal = z;
+    const reversalMagnitude = Math.abs(currentSignal - entrySignal);
+    const signalFlipped = Math.sign(entrySignal) !== Math.sign(currentSignal) && 
+                          Math.sign(entrySignal) !== 0 && 
+                          Math.sign(currentSignal) !== 0;
+
+    // Allow exit if reversal >1.2σ (50% higher than normal to account for exit costs)
+    if (!(signalFlipped && reversalMagnitude > 1.2)) {
+      logger.log(`⏰ <30s left: only large reversals (>1.2σ) allowed, current: ${reversalMagnitude.toFixed(2)}σ`);
+      return { shouldExit: false };
+    }
+
+    logger.log(`🚨 ULTRA-LATE EXIT: Reversal ${reversalMagnitude.toFixed(2)}σ with ${(minsLeft*60).toFixed(0)}s left`);
+    // Allow exit to continue...
   }
   
   // EXIT CONDITION 1: Signal Reversal
@@ -588,50 +659,84 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
   // Must query Data API to get real position
   // ========================================
   
-  logger.log(`🔍 Verifying actual position before exit...`);
-  
+  logger.log(`🔍 Verifying actual position before exit...`); 
   const actualPositions = await getActualPositions(
     FUNDER, // The funder address from config
     tokenIds,
     logger
   );
   
-  if (!actualPositions) {
-    logger.error(`❌ Cannot verify position - aborting exit for safety`);
-    return false;
-  }
-  
   const trackedShares = shares;
-  const actualShares = side === 'UP' ? actualPositions.UP : actualPositions.DOWN;
+  let sharesToExit = trackedShares; // Default to tracked
   
-  // Check for discrepancy between tracked and actual
-  if (Math.abs(actualShares - trackedShares) > 5) {
-    logger.warn(`⚠️  POSITION MISMATCH DETECTED!`);
-    logger.warn(`   Tracked: ${trackedShares} ${side}`);
-    logger.warn(`   Actual:  ${actualShares} ${side}`);
-    logger.warn(`   Difference: ${trackedShares - actualShares} shares (${((Math.abs(trackedShares - actualShares)) / Math.max(trackedShares, 1) * 100).toFixed(1)}%)`);
-    
-    // Use actual shares for exit
-    exitDecision.shares = actualShares;
+  // Handle API failure - DON'T BLOCK EXIT
+  if (!actualPositions) {
+    logger.warn(`⚠️  Data API failed - proceeding with tracked position`);
+    logger.warn(`   Tracked: ${trackedShares} ${side} shares`);
+    logger.warn(`   Risk: May attempt to sell more than we have (exchange will reject gracefully)`);
+    // Continue with tracked shares - better to try and fail than not try at all
+    sharesToExit = trackedShares;
   } else {
-    logger.log(`✅ Position verified: ${actualShares} ${side} shares`);
+    // API returned data - verify it
+    const actualShares = side === 'UP' ? actualPositions.UP : actualPositions.DOWN;
+    
+    // Check for discrepancy
+    if (Math.abs(actualShares - trackedShares) > 5) {
+      logger.warn(`⚠️  POSITION MISMATCH DETECTED!`);
+      logger.warn(`   Tracked: ${trackedShares} ${side}`);
+      logger.warn(`   Actual:  ${actualShares} ${side}`);
+      logger.warn(`   Difference: ${trackedShares - actualShares} shares (${((Math.abs(trackedShares - actualShares)) / Math.max(trackedShares, 1) * 100).toFixed(1)}%)`);
+      
+      // Decision logic:
+      // 1. If actual > 0, use actual (API is correct, fills came in)
+      // 2. If actual = 0 but tracked > 20, trust tracked (API may be stale)
+      // 3. If both small, abort (likely already exited)
+      
+      if (actualShares > 0) {
+        logger.log(`   Using actual: ${actualShares} shares (API has real data)`);
+        sharesToExit = actualShares;
+      } else if (actualShares === 0 && trackedShares >= 20) {
+        logger.warn(`   ⚠️  CRITICAL: API shows 0 but tracked is ${trackedShares} - API likely stale!`);
+        logger.warn(`   Proceeding with tracked position (better to try than skip)`);
+        logger.warn(`   If this fails, exchange will reject gracefully`);
+        sharesToExit = trackedShares;
+      } else {
+        // Both are small or actual=0 and tracked<20
+        logger.warn(`⚠️  Both actual (${actualShares}) and tracked (${trackedShares}) small - likely already exited`);
+        
+        // Update state to match reality
+        if (side === 'UP') {
+          state.sideSharesBySlug[slug].UP = actualShares;
+        } else {
+          state.sideSharesBySlug[slug].DOWN = actualShares;
+        }
+        
+        return false;
+      }
+    } else {
+      logger.log(`✅ Position verified: ${actualShares} ${side} shares`);
+      sharesToExit = actualShares;
+    }
   }
   
-  // Don't exit if actual position too small
-  if (actualShares < EXIT_MIN_POSITION_SIZE) {
-    logger.warn(`⚠️  Actual position too small to exit: ${actualShares} shares (min ${EXIT_MIN_POSITION_SIZE})`);
+  // Final check: only abort if position is truly tiny
+  if (sharesToExit < EXIT_MIN_POSITION_SIZE) {
+    logger.warn(`⚠️  Position too small to exit: ${sharesToExit} shares (min ${EXIT_MIN_POSITION_SIZE})`);
     
-    // Update state to match reality
+    // Update state
     if (side === 'UP') {
-      state.sideSharesBySlug[slug].UP = actualShares;
+      state.sideSharesBySlug[slug].UP = sharesToExit;
     } else {
-      state.sideSharesBySlug[slug].DOWN = actualShares;
+      state.sideSharesBySlug[slug].DOWN = sharesToExit;
     }
     
     return false;
   }
   
-  // Continue with exit using ACTUAL shares
+  // Update exitDecision with final share count
+  exitDecision.shares = sharesToExit;
+  
+  // Continue with exit using determined shares
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
   const orderBook = side === 'UP' ? upBook : downBook;
   
@@ -651,11 +756,11 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
     // Normal: 1 tick below best bid for fast fill
     sellPrice = Math.max(0.01, Math.min(0.99, bestBid - 0.01));
   }
-  
-  const expectedRecovery = actualShares * sellPrice; // Use actual shares!
-  
+
+  const expectedRecovery = sharesToExit * sellPrice;
+
   logger.log(`🚨 EXECUTING EXIT`);
-  logger.log(`   Selling: ${actualShares} ${side} shares @ $${sellPrice.toFixed(2)}`);
+  logger.log(`   Selling: ${sharesToExit} ${side} shares @ $${sellPrice.toFixed(2)}`);
   logger.log(`   Reason: ${reason} | Urgency: ${urgency}`);
   logger.log(`   Expected recovery: $${expectedRecovery.toFixed(2)}`);
   
@@ -664,7 +769,7 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
       tokenID: tokenId,
       price: sellPrice.toFixed(2),
       side: Side.SELL,  // CRITICAL: Use SELL not BUY
-      size: actualShares, // CRITICAL: Use actual shares, not tracked!
+      size: sharesToExit,
       expiration: String(Math.floor(Date.now()/1000) + 300) // 5 min expiry
     }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
     
@@ -678,13 +783,13 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
         orderID: resp.orderID,
         side: side,
         price: sellPrice,
-        size: actualShares,
+        size: sharesToExit,
         type: "EXIT",
         reason: reason,
         urgency: urgency,
         expectedRecovery: expectedRecovery,
         trackedShares: trackedShares,
-        actualShares: actualShares
+        actualShares: sharesToExit
       });
       
       // Update position to zero (we sold entire position)
@@ -813,7 +918,13 @@ function isInSlamWindow(date = new Date()) {
 
 function isUSTradingHours(date = new Date()) {
   const totalMins = date.getUTCHours() * 60 + date.getUTCMinutes();
-  return totalMins >= 12 * 60 + 45 && totalMins < 19 * 60 + 45;
+  const dayOfWeek = date.getUTCDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
+  
+  // Only Monday-Friday (1-5), not weekends (0, 6)
+  const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+  const isInTimeRange = totalMins >= 13 * 60 + 45 && totalMins < 20 * 60 + 30;
+  
+  return isWeekday && isInTimeRange;
 }
 
 // Logging
@@ -1005,10 +1116,6 @@ async function execForAsset(asset, priceData) {
     }
     if (isInSlamWindow()) return;
     if (minsLeft > 14) return;
-    if (minsLeft < 0.15) { // ~10 seconds
-      logger.log(`🛑 ULTRA LATE: ${(minsLeft * 60).toFixed(0)}s left - no trading`);
-      return;
-    }
 
     // 2) Start Price
     let startPrice;
@@ -1129,8 +1236,12 @@ async function execForAsset(asset, priceData) {
       }
     }
 
-    // Continue with normal trading logic if no exit needed...
+    if (minsLeft < 0.15) { // ~10 seconds
+      logger.log(`🛑 ULTRA LATE: ${(minsLeft * 60).toFixed(0)}s left - no trading`);
+      return;
+    }
 
+    // Continue with normal trading logic if no exit needed...
     if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
       logger.log(`⛔ Weak signal position limit: ${sharesUp} shares with z=${z.toFixed(2)}`);
       return;
@@ -1164,8 +1275,10 @@ async function execForAsset(asset, priceData) {
     const isUS = isUSTradingHours();
     if (ENABLE_EARLY_TRADING && !isUS) {
       // Early trading enabled (non-US hours) - graduated thresholds
-      if (minsLeft > 8) {
-        effectiveZMin = 1.9 * regimeScalar; // Super early: very strict
+      if (minsLeft > 10) {
+        effectiveZMin = 2.2 * regimeScalar; // Super early: very strict
+      } else if (minsLeft > 8) {
+        effectiveZMin = 1.9 * regimeScalar; // Kinda early: still strict
       } else if (minsLeft > 5) {
         effectiveZMin = 1.6 * regimeScalar; // Very early: strict
       } else if (minsLeft > 3) {
@@ -1177,11 +1290,11 @@ async function execForAsset(asset, priceData) {
       }
     } else {
       // US hours or early trading disabled
-      if (minsLeft > 3.5) {
+      if (minsLeft > 4) {
         logger.log(`Skip (${minsLeft.toFixed(1)} mins left): ${isUS ? 'US hours' : 'Early trading disabled'}`);
         return;
       } else if (minsLeft > 3) {
-        effectiveZMin = 1.8 * regimeScalar; // Strict for mid window
+        effectiveZMin = 1.6 * regimeScalar; // Down from 1.8, strict for mid window
       } else if (minsLeft > 2) {
         effectiveZMin = 1.0 * regimeScalar; // Normal
       } else {
@@ -1339,11 +1452,6 @@ async function execForAsset(asset, priceData) {
     if (regimeScalar <= 1.1) {
       dynamicMinEdge = dynamicMinEdge * 0.6;
     }
-    
-    // Asset-specific adjustments
-    if (asset.symbol === "SOL") {
-      dynamicMinEdge += 0.02;
-    }
 
     logger.log(`Min Edge Required: ${dynamicMinEdge.toFixed(4)} (Scalar: ${regimeScalar.toFixed(2)})`);
     
@@ -1352,7 +1460,7 @@ async function execForAsset(asset, priceData) {
       const cProb = c.side === "UP" ? pUp : pDown;
       
       if (cProb < 0.90) {
-        required = Math.max(required, 0.05);
+        required = Math.max(required, 0.03); // Down from 0.05
       }
       
       return c.ev > required;
@@ -1524,15 +1632,16 @@ async function execForAsset(asset, priceData) {
 
         // 2. HYBRID LAYERED MODEL
         const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
-        const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
+        // const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
+        const LAYER_MIN_EV = [0.003, 0.002, 0.001, 0.000];
 
         let edgePenalty = 0;
-        if (asset.symbol === "SOL") {
-          edgePenalty += 0.015;
-        }
+        // if (asset.symbol === "SOL") {
+        //   edgePenalty += 0.015;
+        // }
 
         if (sideProb < 0.90) {
-          edgePenalty += 0.03;
+          edgePenalty += 0.015;
         }
 
         logger.log(
@@ -1544,11 +1653,19 @@ async function execForAsset(asset, priceData) {
           let target = sideAsk + LAYER_OFFSETS[i];
           target = Math.max(0.01, Math.min(target, 0.99));
 
+          // Only checked for early LATE_LAYER (>3 mins) - prevents expensive bets with lots of reversal time
+          // Late game LATE_LAYER (<3 mins) has no max price cap - trust the proven signal
+          const maxPrice = getMaxPriceForTime(minsLeft);
+          if (minsLeft > MINUTES_LEFT && target > maxPrice) {
+            logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+            continue;
+          }
+
           const ev = sideProb - target;
           let minEv = LAYER_MIN_EV[i];
 
           if (regimeScalar < 1.2) {
-            minEv *= 0.6;
+            minEv *= 0.5;
           }
           const finalMinEv = minEv + edgePenalty;
 
@@ -1564,6 +1681,14 @@ async function execForAsset(asset, priceData) {
           const layerSize = sizeForTrade(ev, minsLeft, { minEdgeOverride: 0.0, riskBand: layerRiskBand });
           if (layerSize <= 0) {
             logger.log(`Late layer ${i}: size <= 0, skipping.`);
+            continue;
+          }
+
+          // Risk/reward check only applies for early LATE_LAYER entries (>3 mins)
+          // Late game LATE_LAYER (<3 mins) has higher confidence - trust the strategy
+          // This allows profitable 99¢ trades at 1-2 mins with 99%+ probability
+          if (minsLeft > MINUTES_LEFT && !checkRiskReward(target, layerSize, sideProb, minsLeft, logger)) {
+            logger.log(`Layer ${i}: skip, risk/reward too poor`);
             continue;
           }
 
@@ -1676,6 +1801,16 @@ async function execForAsset(asset, priceData) {
     if (state.entryZ === null) {
       state.entryZ = z;
       logger.log(`[Entry Signal] Stored z=${z.toFixed(2)} (NORMAL entry)`);
+    }
+
+    const maxPrice = getMaxPriceForTime(minsLeft);
+    if (best.ask > maxPrice) {
+      logger.log(`🛑 Price ${best.ask.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+      return;
+    }
+
+    if (!checkRiskReward(best.ask, size, prob, minsLeft, logger)) {
+      return;
     }
 
     if (minsLeft < 1.0) {
@@ -1791,7 +1926,7 @@ async function execAll() {
 
 // === STARTUP & SCHEDULER ===
 (async () => {
-  console.log("Initializing Bot v2.4.0...");
+  console.log("Initializing Bot v2.4.1...");
   console.log("🚨 EXIT MECHANISM ENABLED");
   console.log(`   Reversal threshold: ${EXIT_REVERSAL_THRESHOLD}σ (after sign flip)`);
   console.log(`   Emergency probability: ${(EXIT_PROBABILITY_THRESHOLD*100).toFixed(0)}%`);
@@ -1813,7 +1948,7 @@ async function execAll() {
       });
     });
     
-    console.log("🚀 Bot v2.4.0 running with active position management!");
+    console.log("🚀 Bot v2.4.1 running with active position management!");
   } catch (err) {
     console.error("FATAL: Startup failed:", err.message, err.stack);
     process.exit(1);
