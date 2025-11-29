@@ -58,9 +58,9 @@ const ASSETS = [
 ];
 
 const BASIS_BUFFER_BPS = {
-  BTC: 5,   // 0.05% (~$45 at $90k)
-  ETH: 7,   // 0.07%
-  SOL: 7,   // 0.07%
+  BTC: 5,
+  ETH: 7,
+  SOL: 7,
   XRP: 7
 };
 
@@ -117,7 +117,7 @@ const REGIME_SCALAR_MAX = 1.4; // Don't make thresholds too low in high vol
 const Z_HUGE = 2.8; // Requires ~99.7% probability
 const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
-const LATE_GAME_MAX_PRICE = 0.95;
+const LATE_GAME_MAX_PRICE = 0.97;
 
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
@@ -289,9 +289,12 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   if (minsLeft >= 2) {
     return { safe: true, reason: "Not in danger zone" };
   }
-  
+
   const distBps = (Math.abs(currentPrice - startPrice) / startPrice) * 10000;
-  const minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
+  let minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
+  if (Math.abs(z) > 1.5) {
+    minSafeDist *= 0.5;
+  }
   
   if (distBps >= minSafeDist) {
     return { safe: true, reason: `Far from strike: ${distBps.toFixed(1)}bps` };
@@ -304,7 +307,7 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   // Calculate edge for both directions
   const upEdge = upAsk ? pUp - upAsk : 0;
   const downEdge = downAsk ? pDown - downAsk : 0;
-  
+
   if (priceIsAboveStrike) {
     // Price above strike - UP is safer, DOWN is dangerous
     if (z > 0 && upEdge > 0.05) {
@@ -336,8 +339,10 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
       return { safe: false, reason: "Against direction in danger zone" };
     }
   }
-  
-  return { safe: true, reason: "No clear signal" };
+
+  logger.log(`🚫 BASIS RISK: Danger zone (${distBps.toFixed(1)}bps) with poor edge`);
+  return { safe: false, reason: "Danger zone with insufficient edge" };
+  // return { safe: true, reason: "No clear signal" };
 }
 
 function getMaxPriceForTime(minsLeft) {
@@ -1305,7 +1310,7 @@ async function execForAsset(asset, priceData) {
         //   logger.log(`[Calm Market] Early threshold lowered: 1.6 → 1.4`);
         // }
       } else if (minsLeft > 3) {
-        effectiveZMin = 1.2 * regimeScalar; // Mid early: moderate
+        effectiveZMin = 1.1 * regimeScalar; // Mid early: moderate
       } else if (minsLeft > 2) {
         effectiveZMin = 0.9 * regimeScalar; // Getting close: normal
       } else {
@@ -1627,7 +1632,7 @@ async function execForAsset(asset, priceData) {
 
       if (lateSide) {
         if (minsLeft < 2 && sideAsk > LATE_GAME_MAX_PRICE) {
-          logger.log(`⛔ LATE GAME: ${(sideAsk*100).toFixed(0)}¢ > 95¢ max`);
+          logger.log(`⛔ LATE GAME: ${(sideAsk*100).toFixed(0)}¢ > ${LATE_GAME_MAX_PRICE}¢ max`);
           logger.log(`   ${asset.symbol}: Too close to expiry for expensive bets`);
           return;
         }
@@ -1928,7 +1933,12 @@ async function execForAsset(asset, priceData) {
       logger.log(`[Entry Signal] Stored z=${z.toFixed(2)} (NORMAL entry)`);
     }
 
-    const maxPrice = getMaxPriceForTime(minsLeft);
+    let maxPrice = getMaxPriceForTime(minsLeft);
+    if (absZ > 3.0) {
+      maxPrice = 0.98;
+      logger.log(`🚀 Z=${z.toFixed(2)} overrides time-based price cap. New max: 0.98`);
+    }
+
     if (best.ask > maxPrice) {
       logger.log(`🛑 Price ${best.ask.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
       return;
