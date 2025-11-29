@@ -1649,6 +1649,18 @@ async function execForAsset(asset, priceData) {
           return;
         }
 
+        // const ORACLE_SIGMA_MULTIPLE = 2.0;
+        // const expectedMovement = ORACLE_SIGMA_MULTIPLE * rawSigmaPerMin * Math.sqrt(minsLeft);
+        // const absDistanceFromStrike = Math.abs(currentPrice - startPrice);
+
+        // if (absDistanceFromStrike < expectedMovement) {
+        //   logger.log(`⛔ ORACLE RISK: Only $${absDistanceFromStrike.toFixed(2)} from strike`);
+        //   logger.log(`   Need ${expectedMovement.toFixed(2)} buffer (${ORACLE_SIGMA_MULTIPLE}σ × $${rawSigmaPerMin.toFixed(2)}/min × √${minsLeft.toFixed(2)}min)`);
+        //   logger.log(`   ${asset.symbol}: Too close for oracle deviation safety`);
+        //   return;
+        // }
+        // logger.log(`✅ Oracle safe: $${absDistanceFromStrike.toFixed(2)} > ${expectedMovement.toFixed(2)} required buffer`);
+
         // 1. EXTREME SIGNAL - Kelly Criterion sizing
         let zHugeDynamic = Math.min(2.8, Z_HUGE * regimeScalar); // Capped at 2.8
         
