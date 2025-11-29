@@ -493,6 +493,66 @@ function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft
   return { shouldExit: false };
 }
 
+function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, logger) {
+  const slug = state.slug;
+
+  if (sharesUp === 0 && sharesDown === 0) {
+    return { shouldExit: false };
+  }
+
+  const side = sharesUp > 0 ? 'UP' : 'DOWN';
+  const shares = sharesUp > 0 ? sharesUp : sharesDown;
+  const currentAsk = side === 'UP' ? upAsk : downAsk;
+
+  if (!currentAsk) return { shouldExit: false };
+
+  // RULE 1: Always exit at 99¢+ (only 1¢ upside left)
+  if (currentAsk >= 0.99) {
+    logger.log(`💰 PROFIT TAKING: Price ${(currentAsk*100).toFixed(0)}¢ - only 1¢ upside left`);
+    return {
+      shouldExit: true,
+      reason: 'profit_taking_max_price',
+      side: side,
+      shares: shares,
+      urgency: 'normal'
+    };
+  }
+
+  // RULE 2: Exit at 97¢+ if signal weakened
+  if (currentAsk >= 0.97 && Math.abs(z) < 1.5) {
+    logger.log(`💰 PROFIT TAKING: Price ${(currentAsk*100).toFixed(0)}¢ with weak signal z=${z.toFixed(2)}`);
+    logger.log(`   Expensive position + weak signal = reversal risk`);
+    return {
+      shouldExit: true,
+      reason: 'profit_taking_weak_signal',
+      side: side,
+      shares: shares,
+      urgency: 'normal'
+    };
+  }
+
+  // RULE 3: Exit at 95¢+ if <1 min with poor risk/reward
+  if (minsLeft < 1 && currentAsk >= 0.95) {
+    const risking = currentAsk;
+    const gaining = 1.00 - currentAsk;
+    const ratio = risking / gaining;
+
+    if (ratio > 15) {
+      logger.log(`💰 PROFIT TAKING: R/R ${ratio.toFixed(1)}:1 with ${(minsLeft*60).toFixed(0)}s left`);
+      logger.log(`   Risking ${(risking*100).toFixed(0)}¢ to gain ${(gaining*100).toFixed(0)}¢ - not worth it`);
+      return {
+        shouldExit: true,
+        reason: 'profit_taking_rr',
+        side: side,
+        shares: shares,
+        urgency: 'normal'
+      };
+    }
+  }
+
+  return { shouldExit: false };
+}
+
 /**
  * Get actual token positions from Polymarket Data API
  * This queries the real on-chain positions, not just what we think we have
@@ -1259,7 +1319,6 @@ async function execForAsset(asset, priceData) {
     // ==============================================
     
     const exitCheck = shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft, logger);
-    
     if (exitCheck.shouldExit) {
       logger.log(`🚨 EXIT CONDITION MET - Attempting to close position`);
       
@@ -1274,6 +1333,23 @@ async function execForAsset(asset, priceData) {
         logger.warn(`⚠️  Exit attempt failed - Will retry next tick`);
         logger.warn(`⚠️  Blocking new entries to prevent adding to losing position`);
         return; // Don't add to position if exit failed
+      }
+    }
+
+    const profitCheck = shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, logger);
+    if (profitCheck.shouldExit) {
+      logger.log(`💰 PROFIT TAKING TRIGGERED - Attempting to close position`);
+
+      const exitSuccess = await executeExit(asset, state, profitCheck, upBook, downBook, logger);
+
+      if (exitSuccess) {
+        state.weakSignalHistory = [];
+        state.weakSignalCount = 0;
+        logger.log(`✅ Profits secured - Stopping further trading this tick`);
+        return;
+      } else {
+        logger.warn(`⚠️  Profit-taking exit failed - Will retry next tick`);
+        return;
       }
     }
 
