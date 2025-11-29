@@ -829,7 +829,8 @@ async function execForAsset(asset, priceData) {
     const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
     
     // Regime scalar clamped to prevent extreme adjustments
-    const rawRegimeScalar = Math.sqrt(volRatio);
+    // const rawRegimeScalar = Math.sqrt(volRatio);
+    const rawRegimeScalar = 1 / Math.sqrt(volRatio);
     const regimeScalar = Math.max(REGIME_SCALAR_MIN, Math.min(REGIME_SCALAR_MAX, rawRegimeScalar));
 
     const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
