@@ -292,6 +292,7 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
 
   const distBps = (Math.abs(currentPrice - startPrice) / startPrice) * 10000;
   let minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
+  // TODO: consider removing this
   if (Math.abs(z) > 1.5) {
     minSafeDist *= 0.5;
   } else if (Math.abs(z) > 1.2) {
@@ -804,6 +805,7 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
       
       // Clear entry Z since we've exited the position
       state.entryZ = null;
+      state.minZSinceEntry = null;
       state.exitTimestamp = Date.now();
 
       const pos = state.sideSharesBySlug[slug];
@@ -1053,6 +1055,7 @@ function ensureState(asset, logger) {
       weakSignalCount: 0,
       weakSignalHistory: [],
       liquidityHistory: [],
+      minZSinceEntry: null
     };
     console.log(`[${asset.symbol}] Reset state for ${slug}`);
 
@@ -1616,6 +1619,7 @@ async function execForAsset(asset, priceData) {
         sideAsk = downAsk || 0.99; 
       }
 
+      // TODO: remove this if using ORACLE_SIGMA_MULTIPLE below
       if (minsLeft < 2 && minsLeft > 0.5 && sideAsk > 0.85) {
         // Require price to be at least 0.5 sigma away from strike
         const minDistanceRequired = 0.5 * rawSigmaPerMin * Math.sqrt(minsLeft);
@@ -1649,6 +1653,7 @@ async function execForAsset(asset, priceData) {
           return;
         }
 
+        // TODO: consider enabling this
         // const ORACLE_SIGMA_MULTIPLE = 2.0;
         // const expectedMovement = ORACLE_SIGMA_MULTIPLE * rawSigmaPerMin * Math.sqrt(minsLeft);
         // const absDistanceFromStrike = Math.abs(currentPrice - startPrice);
@@ -1667,7 +1672,7 @@ async function execForAsset(asset, priceData) {
         // RESTORED: Apply low-vol adjustment to extreme threshold
         if (rawRegimeScalar < 1.1) {
           const oldZHuge = zHugeDynamic;
-          zHugeDynamic *= 0.90; // 10% easier in low vol
+          zHugeDynamic *= 0.95; // 5% easier in low vol
           logger.log(`[Low Vol] Extreme threshold: ${oldZHuge.toFixed(2)} → ${zHugeDynamic.toFixed(2)}`);
         }
         
@@ -1752,31 +1757,45 @@ async function execForAsset(asset, priceData) {
             const entrySignalForCap = state.entryZ;
             const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
             const entryStrength = Math.abs(entrySignalForCap);
-
+            
             // CRITICAL: Check if signal flipped sign FIRST
             const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
-
             if (!sameSign) {
               // Signal reversed - always block regardless of magnitude
               logger.log(`⛔ LATE_LAYER CAP: Signal reversed ${entrySignalForCap.toFixed(2)} → ${currentSignalForCap.toFixed(2)}`);
               return;
             }
-
-            // Same sign - check if weakening
+            
+            // 🆕 WHIPSAW DETECTION: Track weakest signal since entry
+            // Initialize minZSinceEntry on first check
+            if (state.minZSinceEntry === undefined || state.minZSinceEntry === null) {
+              state.minZSinceEntry = entrySignalForCap;
+            }
+            
+            // Update minimum if current signal is weaker (closer to zero)
+            if (Math.abs(currentSignalForCap) < Math.abs(state.minZSinceEntry)) {
+              state.minZSinceEntry = currentSignalForCap;
+              logger.log(`📊 New weakest signal: ${currentSignalForCap.toFixed(2)} (entry: ${entrySignalForCap.toFixed(2)})`);
+            }
+            
+            // Check if signal EVER dropped >30% (even if it recovered)
+            const worstWeakening = (entryStrength - Math.abs(state.minZSinceEntry)) / entryStrength;
+            
+            if (worstWeakening > 0.3) {
+              logger.log(`⛔ LATE_LAYER CAP: Signal dropped ${(worstWeakening*100).toFixed(0)}% since entry (WHIPSAW)`);
+              logger.log(`   Entry: ${entrySignalForCap.toFixed(2)} → Lowest: ${state.minZSinceEntry.toFixed(2)} → Current: ${currentSignalForCap.toFixed(2)}`);
+              return;
+            }
+            
+            // Also check current weakening (your original check - keep this as backup)
             const currentStrength = Math.abs(currentSignalForCap);
-            const signalWeakening = (entryStrength - currentStrength) / entryStrength;
-
-            if (signalWeakening > 0.3) {
-              logger.log(`⛔ LATE_LAYER CAP: Signal weakened ${(signalWeakening*100).toFixed(0)}% (${totalShares} shares)`);
+            const currentWeakening = (entryStrength - currentStrength) / entryStrength;
+            
+            if (currentWeakening > 0.3) {
+              logger.log(`⛔ LATE_LAYER CAP: Signal currently weak ${(currentWeakening*100).toFixed(0)}% (${totalShares} shares)`);
               return;
             }
           }
-
-          // Signal still strong but position large, cap at 400
-          // if (totalShares >= 400) {
-          //   logger.log(`⛔ LATE_LAYER CAP: Max position (${totalShares} shares)`);
-          //   return;
-          // }
         }
 
         // 2. HYBRID LAYERED MODEL
@@ -1801,10 +1820,11 @@ async function execForAsset(asset, priceData) {
 
         for (let i = 0; i < LAYER_OFFSETS.length; i++) {
           let target = sideAsk + LAYER_OFFSETS[i];
-          target = Math.max(0.01, Math.min(target, LATE_GAME_MAX_PRICE));
+          target = Math.max(0.01, Math.min(target, lateGameMax));
 
           // Only checked for early LATE_LAYER (>3 mins) - prevents expensive bets with lots of reversal time
           // Late game LATE_LAYER (<3 mins) has no max price cap - trust the proven signal
+          // TODO: consider using this
           // const maxPrice = getMaxPriceForTime(minsLeft);
           // const isExtremeSignal = absZ > 2.2;
           // if (minsLeft > MINUTES_LEFT) {
