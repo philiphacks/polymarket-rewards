@@ -1417,7 +1417,7 @@ async function execForAsset(asset, priceData) {
       } else if (minsLeft > 4) {
         effectiveZMin = 1.2 * regimeScalar;
       } else if (minsLeft > 3) {
-        effectiveZMin = 1.1 * regimeScalar; // Mid early: moderate
+        effectiveZMin = 1.3 * regimeScalar; // Mid early: moderate
       } else if (minsLeft > 2) {
         effectiveZMin = 0.9 * regimeScalar; // Getting close: normal
       } else {
@@ -1734,7 +1734,7 @@ async function execForAsset(asset, priceData) {
           logger.log(`   Too close to strike for expensive late entry`);
           return;
         } else {
-          logger.log(`✅ Margin OK: $${actualDistance.toFixed(2)} > $${minDistanceRequired.toFixed(2)} (${(actualDistance/minDistanceRequired).toFixed(1)}σ)`);
+          logger.log(`✅ Margin OK: $${actualDistance.toFixed(4)} > $${minDistanceRequired.toFixed(4)} (${(actualDistance/minDistanceRequired).toFixed(1)}σ)`);
         }
       }
 
