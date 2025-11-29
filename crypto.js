@@ -98,6 +98,7 @@ const CORRELATION_MATRIX = {
 const EXIT_REVERSAL_THRESHOLD = 0.8; // Exit if signal reverses by this many σ after sign flip
 const EXIT_PROBABILITY_THRESHOLD = 0.75; // Emergency exit if probability against position > 75%
 const EXIT_MIN_POSITION_SIZE = 10; // Don't bother exiting positions smaller than this
+const RECONCILE_INTERVAL_MS = 60000; // Reconcile every 60 seconds
 
 // Time / edge thresholds
 const MINUTES_LEFT = 3;
@@ -633,11 +634,11 @@ async function reconcilePositions(state, logger) {
       if (age < 30000) {
         // Orders < 30s old - definitely wait
         logger.log(`⏳ Skipping reconciliation: ${pendingForMarket.length} pending orders <30s old`);
-        return;
+        return { reconciled: false }; // 🆕 Return status
       } else if (age < 60000) {
         // Orders 30-60s old - probably still filling, wait unless critical
         logger.log(`⏳ Skipping reconciliation: pending orders ${(age/1000).toFixed(0)}s old (waiting for settlement)`);
-        return;
+        return { reconciled: false }; // 🆕 Return status
       } else {
         // Orders >60s old - likely settled (even if partially), safe to reconcile
         logger.warn(`⚠️  Reconciling despite ${pendingForMarket.length} pending: orders ${(age/1000).toFixed(0)}s old (likely settled)`);
@@ -647,7 +648,7 @@ async function reconcilePositions(state, logger) {
     
     const actual = await getActualPositions(FUNDER, tokenIds, logger);
     
-    if (!actual) return;
+    if (!actual) return { reconciled: false }; // 🆕 Return status
     
     const tracked = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
     
@@ -703,17 +704,30 @@ async function reconcilePositions(state, logger) {
         logger.warn(`⚠️  NOT reconciling: Tracked > Actual suggests pending fills`);
         logger.warn(`   This is expected immediately after placing orders`);
         logger.warn(`   Will reconcile after orders complete or on next cycle`);
-        return;
+        return { reconciled: false }; // 🆕 Return status
       }
 
       if (shouldReconcile) {
         logger.log(`✅ Reconciling: ${reconcileReason}`);
         state.sideSharesBySlug[slug] = { UP: actual.UP, DOWN: actual.DOWN };
         logger.log(`✅ Positions reconciled to actual values`);
+        return { reconciled: true, actual }; // 🆕 Return status
       }
+    } else {
+      // No significant difference - still update if actual is non-zero and we thought we had nothing
+      if ((actual.UP > 0 || actual.DOWN > 0) && tracked.UP === 0 && tracked.DOWN === 0) {
+        logger.log(`📊 Discovered other bot's position: ${actual.UP} UP, ${actual.DOWN} DOWN`);
+        state.sideSharesBySlug[slug] = { UP: actual.UP, DOWN: actual.DOWN };
+        return { reconciled: true, actual }; // 🆕 NEW: Update even without large diff
+      }
+      
+      logger.log(`✅ Positions match: ${actual.UP} UP, ${actual.DOWN} DOWN`);
+      return { reconciled: false }; // 🆕 Return status
     }
+    
   } catch (err) {
     logger.error(`Position reconciliation failed: ${err.message}`);
+    return { reconciled: false }; // 🆕 Return status
   }
 }
 
@@ -1149,7 +1163,8 @@ function ensureState(asset, logger) {
       weakSignalCount: 0,
       weakSignalHistory: [],
       liquidityHistory: [],
-      minZSinceEntry: null
+      minZSinceEntry: null,
+      lastReconcileTime: 0
     };
     console.log(`[${asset.symbol}] Reset state for ${slug}`);
 
@@ -1341,17 +1356,26 @@ async function execForAsset(asset, priceData) {
     // ==============================================
     // NEW in v2.4.0: RECONCILE POSITIONS (if we have any)
     // ==============================================
-    
-    if (sharesUp > 5 || sharesDown > 5) {
-      // Only reconcile if we have a significant position
-      // This catches fill discrepancies before exit logic
+    const now = Date.now();
+    const timeSinceLastReconcile = now - (state.lastReconcileTime || 0);
+
+    const hasPosition = sharesUp > 5 || sharesDown > 5;
+    const shouldReconcile = hasPosition || timeSinceLastReconcile >= RECONCILE_INTERVAL_MS;
+
+    if (shouldReconcile) {
+      if (hasPosition) {
+        logger.log(`📊 Reconciling: Have position (${sharesUp} UP, ${sharesDown} DOWN)`);
+      } else {
+        logger.log(`📊 Reconciling: Periodic check (${(timeSinceLastReconcile/1000).toFixed(0)}s since last)`);
+      }
+      
       await reconcilePositions(state, logger);
+      state.lastReconcileTime = now; // Update timestamp
     }
 
     // ==============================================
     // NEW in v2.4.0: CHECK EXIT CONDITIONS
     // ==============================================
-    
     const exitCheck = shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft, logger);
     if (exitCheck.shouldExit) {
       logger.log(`🚨 EXIT CONDITION MET - Attempting to close position`);
