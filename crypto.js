@@ -494,7 +494,7 @@ function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft
   return { shouldExit: false };
 }
 
-function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, logger) {
+function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, avgEntryPriceUp, avgEntryPriceDown, logger) {
   const slug = state.slug;
 
   if (sharesUp === 0 && sharesDown === 0) {
@@ -504,11 +504,41 @@ function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesD
   const side = sharesUp > 0 ? 'UP' : 'DOWN';
   const shares = sharesUp > 0 ? sharesUp : sharesDown;
   const currentAsk = side === 'UP' ? upAsk : downAsk;
+  const avgEntryPrice = side === 'UP' ? avgEntryPriceUp : avgEntryPriceDown;  // 🆕 NEW
 
   if (!currentAsk) return { shouldExit: false };
 
+  // ==============================================
+  // MINIMUM PROFIT REQUIREMENTS
+  // ==============================================
+  
+  const MIN_PROFIT_CENTS = 0.02;      // At least 2¢ per share
+  const MIN_PROFIT_PERCENT = 0.05;    // Or 5% ROI
+  
+  // Calculate required exit price
+  let minProfitableExit = 0;
+  if (avgEntryPrice > 0) {
+    const absoluteMin = avgEntryPrice + MIN_PROFIT_CENTS;  // Entry + 2¢
+    const percentMin = avgEntryPrice * (1 + MIN_PROFIT_PERCENT);  // Entry × 1.05
+    minProfitableExit = Math.max(absoluteMin, percentMin);
+    
+    logger.log(`💰 Profit requirements: entry ${(avgEntryPrice*100).toFixed(1)}¢ → min exit ${(minProfitableExit*100).toFixed(1)}¢`);
+    logger.log(`   (Absolute: ${(absoluteMin*100).toFixed(1)}¢ | Percent: ${(percentMin*100).toFixed(1)}¢)`);
+  }
+
+  // ==============================================
   // RULE 1: Always exit at 99¢+ (only 1¢ upside left)
+  // Exception to profit rules - can't be greedy with 1¢ left
+  // ==============================================
+  
   if (currentAsk >= 0.99) {
+    // Check if profitable at all (not a complete loss)
+    if (avgEntryPrice > 0 && currentAsk < avgEntryPrice) {
+      logger.log(`⚠️  At 99¢ but LOSING: entry ${(avgEntryPrice*100).toFixed(1)}¢ → current ${(currentAsk*100).toFixed(1)}¢`);
+      logger.log(`   Would lose ${((avgEntryPrice - currentAsk)*100).toFixed(1)}¢/share - NOT exiting`);
+      return { shouldExit: false };
+    }
+    
     logger.log(`💰 PROFIT TAKING: Price ${(currentAsk*100).toFixed(0)}¢ - only 1¢ upside left`);
     return {
       shouldExit: true,
@@ -519,10 +549,31 @@ function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesD
     };
   }
 
+  // ==============================================
   // RULE 2: Exit at 97¢+ if signal weakened
+  // Must meet minimum profit requirements
+  // ==============================================
+  
   if (currentAsk >= 0.97 && Math.abs(z) < 1.5) {
+    // Check minimum profit requirement
+    if (avgEntryPrice > 0 && currentAsk < minProfitableExit) {
+      const actualProfit = currentAsk - avgEntryPrice;
+      const requiredProfit = minProfitableExit - avgEntryPrice;
+      
+      logger.log(`⚠️  Weak signal @ 97¢+ but profit too small:`);
+      logger.log(`   Entry: ${(avgEntryPrice*100).toFixed(1)}¢ → Current: ${(currentAsk*100).toFixed(1)}¢`);
+      logger.log(`   Profit: ${(actualProfit*100).toFixed(1)}¢ < ${(requiredProfit*100).toFixed(1)}¢ required`);
+      logger.log(`   Waiting for better exit or stronger signal...`);
+      return { shouldExit: false };
+    }
+    
+    const profit = avgEntryPrice > 0 ? currentAsk - avgEntryPrice : 0;
     logger.log(`💰 PROFIT TAKING: Price ${(currentAsk*100).toFixed(0)}¢ with weak signal z=${z.toFixed(2)}`);
     logger.log(`   Expensive position + weak signal = reversal risk`);
+    if (avgEntryPrice > 0) {
+      logger.log(`   Profit: ${(profit*100).toFixed(1)}¢/share (${((profit/avgEntryPrice)*100).toFixed(1)}% ROI)`);
+    }
+    
     return {
       shouldExit: true,
       reason: 'profit_taking_weak_signal',
@@ -532,15 +583,36 @@ function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesD
     };
   }
 
+  // ==============================================
   // RULE 3: Exit at 95¢+ if <1 min with poor risk/reward
+  // Must meet minimum profit requirements
+  // ==============================================
+  
   if (minsLeft < 1 && currentAsk >= 0.95) {
     const risking = currentAsk;
     const gaining = 1.00 - currentAsk;
     const ratio = risking / gaining;
 
     if (ratio > 15) {
+      // Check minimum profit requirement
+      if (avgEntryPrice > 0 && currentAsk < minProfitableExit) {
+        const actualProfit = currentAsk - avgEntryPrice;
+        const requiredProfit = minProfitableExit - avgEntryPrice;
+        
+        logger.log(`⚠️  Bad R/R @ 95¢+ but profit too small:`);
+        logger.log(`   Entry: ${(avgEntryPrice*100).toFixed(1)}¢ → Current: ${(currentAsk*100).toFixed(1)}¢`);
+        logger.log(`   Profit: ${(actualProfit*100).toFixed(1)}¢ < ${(requiredProfit*100).toFixed(1)}¢ required`);
+        logger.log(`   R/R is ${ratio.toFixed(1)}:1 but holding for more profit...`);
+        return { shouldExit: false };
+      }
+      
+      const profit = avgEntryPrice > 0 ? currentAsk - avgEntryPrice : 0;
       logger.log(`💰 PROFIT TAKING: R/R ${ratio.toFixed(1)}:1 with ${(minsLeft*60).toFixed(0)}s left`);
       logger.log(`   Risking ${(risking*100).toFixed(0)}¢ to gain ${(gaining*100).toFixed(0)}¢ - not worth it`);
+      if (avgEntryPrice > 0) {
+        logger.log(`   Profit: ${(profit*100).toFixed(1)}¢/share (${((profit/avgEntryPrice)*100).toFixed(1)}% ROI)`);
+      }
+      
       return {
         shouldExit: true,
         reason: 'profit_taking_rr',
@@ -1362,6 +1434,8 @@ async function execForAsset(asset, priceData) {
 
     const hasPosition = sharesUp > 5 || sharesDown > 5;
     const shouldReconcile = hasPosition || timeSinceLastReconcile >= RECONCILE_INTERVAL_MS;
+    let avgEntryPriceUp = 0;
+    let avgEntryPriceDown = 0;
 
     if (shouldReconcile) {
       if (hasPosition) {
@@ -1372,6 +1446,19 @@ async function execForAsset(asset, priceData) {
       
       await reconcilePositions(state, logger);
       state.lastReconcileTime = now; // Update timestamp
+
+      const quickPositionCheck = await getActualPositions(FUNDER, tokenIds, logger);
+      if (quickPositionCheck) {
+        avgEntryPriceUp = quickPositionCheck.upAvgPrice || 0;
+        avgEntryPriceDown = quickPositionCheck.downAvgPrice || 0;
+        
+        if (avgEntryPriceUp > 0) {
+          logger.log(`📊 UP position avg entry: ${(avgEntryPriceUp*100).toFixed(1)}¢`);
+        }
+        if (avgEntryPriceDown > 0) {
+          logger.log(`📊 DOWN position avg entry: ${(avgEntryPriceDown*100).toFixed(1)}¢`);
+        }
+      }
     }
 
     // ==============================================
@@ -1395,7 +1482,7 @@ async function execForAsset(asset, priceData) {
       }
     }
 
-    const profitCheck = shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, logger);
+    const profitCheck = shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, avgEntryPriceUp, avgEntryPriceDown, logger);
     if (profitCheck.shouldExit) {
       logger.log(`💰 PROFIT TAKING TRIGGERED - Attempting to close position`);
 
@@ -1802,7 +1889,7 @@ async function execForAsset(asset, priceData) {
         // logger.log(`✅ Oracle safe: $${absDistanceFromStrike.toFixed(2)} > ${expectedMovement.toFixed(2)} required buffer`);
 
         // 1. EXTREME SIGNAL - Kelly Criterion sizing
-        let zHugeDynamic = Math.min(2.8, Z_HUGE * regimeScalar); // Capped at 2.8
+        let zHugeDynamic = Math.min(2.8, Z_HUGE / regimeScalar); // Capped at 2.8
         
         // RESTORED: Apply low-vol adjustment to extreme threshold
         if (rawRegimeScalar < 1.1) {

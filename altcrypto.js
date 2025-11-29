@@ -1186,7 +1186,7 @@ async function execForAsset(asset, priceData) {
 
       if (lateSide) {
         // 1. EXTREME SIGNAL - Kelly Criterion sizing
-        let zHugeDynamic = Math.min(2.8, Z_HUGE * regimeScalar); // Capped at 2.8
+        let zHugeDynamic = Math.min(2.8, Z_HUGE / regimeScalar); // Capped at 2.8
         
         // RESTORED: Apply low-vol adjustment to extreme threshold
         if (rawRegimeScalar < 1.1) {
