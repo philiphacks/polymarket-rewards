@@ -294,12 +294,16 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   let minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
   if (Math.abs(z) > 1.5) {
     minSafeDist *= 0.5;
+  } else if (Math.abs(z) > 1.2) {
+    minSafeDist *= 0.75;
+  } else if (Math.abs(z) > 0.8) {
+    minSafeDist *= 0.9;
   }
   
   if (distBps >= minSafeDist) {
     return { safe: true, reason: `Far from strike: ${distBps.toFixed(1)}bps` };
   }
-  
+
   // In danger zone - apply strict rules
   const priceIsAboveStrike = currentPrice > startPrice;
   const absZ = Math.abs(z);
