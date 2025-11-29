@@ -1170,6 +1170,20 @@ async function execForAsset(asset, priceData) {
         sideAsk = downAsk || 0.99; 
       }
 
+      if (minsLeft < 0.5 && sideAsk > 0.85) {
+        // Require price to be at least 0.5 sigma away from strike
+        const minDistanceRequired = 0.5 * rawSigmaPerMin * Math.sqrt(minsLeft);
+        const actualDistance = Math.abs(currentPrice - startPrice);
+
+        if (actualDistance < minDistanceRequired) {
+          logger.log(`⛔ THIN MARGIN: $${actualDistance.toFixed(2)} < $${minDistanceRequired.toFixed(2)} (0.5σ at ${minsLeft.toFixed(1)}m)`);
+          logger.log(`   Too close to strike for expensive late entry`);
+          return;
+        } else {
+          logger.log(`✅ Margin OK: $${actualDistance.toFixed(4)} > $${minDistanceRequired.toFixed(4)} (${(actualDistance/minDistanceRequired).toFixed(1)}σ)`);
+        }
+      }
+
       if (lateSide) {
         // 1. EXTREME SIGNAL - Kelly Criterion sizing
         let zHugeDynamic = Math.min(2.8, Z_HUGE * regimeScalar); // Capped at 2.8
