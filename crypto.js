@@ -395,31 +395,6 @@ function checkRiskReward(price, size, prob, minsLeft, logger) {
   return true;
 }
 
-// Add this function after addPosition (around line 724):
-
-function updateAvgEntryPrice(state, slug, side, newShares, newPrice, logger) {
-  if (!state.avgEntryPriceBySlug) {
-    state.avgEntryPriceBySlug = {};
-  }
-  if (!state.avgEntryPriceBySlug[slug]) {
-    state.avgEntryPriceBySlug[slug] = { UP: 0, DOWN: 0 };
-  }
-  
-  const currentShares = state.sideSharesBySlug[slug][side] - newShares; // Shares before this buy
-  const currentAvg = state.avgEntryPriceBySlug[slug][side];
-  
-  // Weighted average
-  const totalCost = (currentShares * currentAvg) + (newShares * newPrice);
-  const totalShares = currentShares + newShares;
-  const newAvg = totalShares > 0 ? totalCost / totalShares : 0;
-  
-  state.avgEntryPriceBySlug[slug][side] = newAvg;
-  
-  if (logger && newShares > 0) {
-    logger.log(`💰 Updated avg entry: ${side} @ ${(newAvg*100).toFixed(2)}¢ (added ${newShares} @ ${(newPrice*100).toFixed(2)}¢)`);
-  }
-}
-
 // ========================================
 // EXIT LOGIC (NEW in v2.4.0)
 // ========================================
@@ -520,38 +495,20 @@ function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft
 
 function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, logger) {
   const slug = state.slug;
-  
+
   if (sharesUp === 0 && sharesDown === 0) {
     return { shouldExit: false };
   }
-  
+
   const side = sharesUp > 0 ? 'UP' : 'DOWN';
   const shares = sharesUp > 0 ? sharesUp : sharesDown;
   const currentAsk = side === 'UP' ? upAsk : downAsk;
-  
+
   if (!currentAsk) return { shouldExit: false };
-  
-  // 🆕 CHECK: Do we have entry price tracked?
-  const avgEntryPrice = state.avgEntryPriceBySlug?.[slug]?.[side] || 0;
-  
-  if (avgEntryPrice === 0) {
-    logger.log(`⚠️  No entry price tracked - skipping profit-taking (might be old bot's shares)`);
-    return { shouldExit: false };
-  }
-  
-  // 🆕 CRITICAL: Only exit if we'd be profitable!
-  const potentialProfit = currentAsk - avgEntryPrice;
-  
-  if (potentialProfit <= 0) {
-    logger.log(`⚠️  Position not profitable: entry=${(avgEntryPrice*100).toFixed(1)}¢, current=${(currentAsk*100).toFixed(1)}¢`);
-    logger.log(`   Skipping profit-taking (would lose ${(-potentialProfit*100).toFixed(1)}¢/share)`);
-    return { shouldExit: false };
-  }
-  
-  // RULE 1: Always exit at 99¢ (only 1¢ upside left) - IF PROFITABLE
-  if (currentAsk >= 0.99 && avgEntryPrice < 0.95) {
+
+  // RULE 1: Always exit at 99¢+ (only 1¢ upside left)
+  if (currentAsk >= 0.99) {
     logger.log(`💰 PROFIT TAKING: Price ${(currentAsk*100).toFixed(0)}¢ - only 1¢ upside left`);
-    logger.log(`   Entry: ${(avgEntryPrice*100).toFixed(1)}¢ → Exit: ${(currentAsk*100).toFixed(1)}¢ = +${(potentialProfit*100).toFixed(1)}¢/share`);
     return {
       shouldExit: true,
       reason: 'profit_taking_max_price',
@@ -560,11 +517,10 @@ function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesD
       urgency: 'normal'
     };
   }
-  
-  // RULE 2: Exit at 97¢+ if signal weakened - IF PROFITABLE
-  if (currentAsk >= 0.97 && Math.abs(z) < 1.5 && avgEntryPrice < 0.90) {
+
+  // RULE 2: Exit at 97¢+ if signal weakened
+  if (currentAsk >= 0.97 && Math.abs(z) < 1.5) {
     logger.log(`💰 PROFIT TAKING: Price ${(currentAsk*100).toFixed(0)}¢ with weak signal z=${z.toFixed(2)}`);
-    logger.log(`   Entry: ${(avgEntryPrice*100).toFixed(1)}¢ → Exit: ${(currentAsk*100).toFixed(1)}¢ = +${(potentialProfit*100).toFixed(1)}¢/share`);
     logger.log(`   Expensive position + weak signal = reversal risk`);
     return {
       shouldExit: true,
@@ -574,16 +530,15 @@ function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesD
       urgency: 'normal'
     };
   }
-  
-  // RULE 3: Exit at 95¢+ if <1 min with poor risk/reward - IF PROFITABLE
-  if (minsLeft < 1 && currentAsk >= 0.95 && avgEntryPrice < 0.85) {
+
+  // RULE 3: Exit at 95¢+ if <1 min with poor risk/reward
+  if (minsLeft < 1 && currentAsk >= 0.95) {
     const risking = currentAsk;
     const gaining = 1.00 - currentAsk;
     const ratio = risking / gaining;
-    
+
     if (ratio > 15) {
       logger.log(`💰 PROFIT TAKING: R/R ${ratio.toFixed(1)}:1 with ${(minsLeft*60).toFixed(0)}s left`);
-      logger.log(`   Entry: ${(avgEntryPrice*100).toFixed(1)}¢ → Exit: ${(currentAsk*100).toFixed(1)}¢ = +${(potentialProfit*100).toFixed(1)}¢/share`);
       logger.log(`   Risking ${(risking*100).toFixed(0)}¢ to gain ${(gaining*100).toFixed(0)}¢ - not worth it`);
       return {
         shouldExit: true,
@@ -594,7 +549,7 @@ function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesD
       };
     }
   }
-  
+
   return { shouldExit: false };
 }
 
@@ -939,7 +894,6 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
       // Clear entry Z since we've exited the position
       state.entryZ = null;
       state.minZSinceEntry = null;
-      state.avgEntryPriceBySlug[slug][side] = 0;
       state.exitTimestamp = Date.now();
 
       const pos = state.sideSharesBySlug[slug];
@@ -1180,7 +1134,6 @@ function ensureState(asset, logger) {
       gammaUrl: `https://gamma-api.polymarket.com/markets/slug/${slug}`,
       sharesBoughtBySlug: { [slug]: 0 },
       sideSharesBySlug: { [slug]: { UP: 0, DOWN: 0 } },
-      avgEntryPriceBySlug: { [slug]: { UP: 0, DOWN: 0 } },
       resetting: false,
       cpData: null,
       marketMeta: null,
@@ -1881,7 +1834,6 @@ async function execForAsset(asset, priceData) {
 
                 addPosition(state, slug, lateSide, bigSize);
                 state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + bigSize;
-                updateAvgEntryPrice(state, slug, lateSide, bigSize, limitPrice, logger);
               }
             } catch (err) {
               logger.error(`EXTREME order failed: ${err.message}`);
@@ -2081,7 +2033,6 @@ async function execForAsset(asset, priceData) {
 
               addPosition(state, slug, lateSide, layerSize);
               state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + layerSize;
-              updateAvgEntryPrice(state, slug, lateSide, layerSize, limitPrice, logger);
             }
           } catch (err) {
             logger.error(`Error layer ${i}: ${err.message}`);
@@ -2194,7 +2145,6 @@ async function execForAsset(asset, priceData) {
 
         addPosition(state, slug, best.side, size);
         state.sharesBoughtBySlug[slug] = (state.sharesBoughtBySlug[slug] || 0) + size;
-        updateAvgEntryPrice(state, slug, best.side, size, best.ask, logger);
       }
     } catch (err) {
       logger.error(`Normal order failed: ${err.message}`);
