@@ -1,6 +1,3 @@
-// START version
-// https://github.com/philiphacks/polymarket-rewards/commit/a42a53ffede79e5cbe3a93b09208e7960df7906f#diff-d48802f57d7e4cc845aefd2f57978b667a81c47182245b01ba66497a1e36b8d8
-
 // Version 2.4.1 - CRITICAL BUG FIXES
 // FIXED: Exit blocked by stale Data API (prevented $282 SOL loss)
 // FIXED: <30s exit threshold lowered to 1.2σ (prevented $86 ETH loss)

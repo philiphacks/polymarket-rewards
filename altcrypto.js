@@ -1,3 +1,6 @@
+// START version
+// https://github.com/philiphacks/polymarket-rewards/commit/feaeea53a046df93cc670913ae3ebbb730f74382#diff-d48802f57d7e4cc845aefd2f57978b667a81c47182245b01ba66497a1e36b8d8
+
 // Version 2.3.1 - Signal-Aware Trading with Reversal Detection (Verified)
 // Key Changes from 2.1:
 // - Added entry z-score storage for signal reversal detection
