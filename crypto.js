@@ -800,25 +800,51 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
   // Update exitDecision with final share count
   exitDecision.shares = sharesToExit;
   
-  // Continue with exit using determined shares
-  const tokenId = side === 'UP' ? upTokenId : downTokenId;
-  const orderBook = side === 'UP' ? upBook : downBook;
+  // ========================================
+  // OPTIMIZED EXIT PRICING
+  // ========================================
   
-  const { bestBid } = getBestBidAsk(orderBook);
+  // Select the correct order book (UP or DOWN token)
+  const tokenOrderBook = side === 'UP' ? upBook : downBook;
+  const tokenId = side === 'UP' ? upTokenId : downTokenId;
+  
+  // Get best bid and ask from the SAME book
+  const { bestBid, bestAsk } = getBestBidAsk(tokenOrderBook);
   
   if (!bestBid) {
     logger.error(`❌ Cannot exit ${side}: No bid available`);
     return false;
   }
   
-  // Determine sell price based on urgency
+  // Determine optimal sell price based on urgency and market conditions
   let sellPrice;
+  
   if (urgency === 'emergency') {
-    // Very aggressive: 2 ticks below best bid for guaranteed fast fill
+    // EMERGENCY: Sell aggressively to guarantee instant fill
+    // Go 2 ticks below best bid
     sellPrice = Math.max(0.01, Math.min(0.99, bestBid - 0.02));
+    logger.log(`   🚨 Emergency pricing: ${(sellPrice*100).toFixed(1)}¢ (bid - 2¢)`);
+    logger.log(`      Prioritizing speed over price`);
+    
+  } else if (bestAsk && bestAsk >= 0.95) {
+    // EXPENSIVE POSITION (>95¢): Optimize for maximum value
+    // The spread is usually tight here, and that 1-2¢ represents most of our profit!
+    // Try to sell closer to the mid-point instead of giving away free money
+    
+    const spreadMid = (bestBid + bestAsk) / 2;
+    
+    // Sell at mid-point, but never below best bid
+    sellPrice = Math.max(bestBid, Math.min(0.99, spreadMid));
+    
+    logger.log(`   💰 Expensive exit optimization:`);
+    logger.log(`      Bid: ${(bestBid*100).toFixed(1)}¢ | Ask: ${(bestAsk*100).toFixed(1)}¢ | Spread mid: ${(spreadMid*100).toFixed(1)}¢`);
+    logger.log(`      Selling @ ${(sellPrice*100).toFixed(1)}¢ (OLD would have been ${((bestBid-0.01)*100).toFixed(1)}¢)`);
+    logger.log(`      Improvement: ${((sellPrice - (bestBid-0.01))*100).toFixed(1)}¢ per share`);
+    
   } else {
-    // Normal: 1 tick below best bid for fast fill
-    sellPrice = Math.max(0.01, Math.min(0.99, bestBid - 0.01));
+    // NORMAL EXIT: Sell at best bid (instant fill, no giveaway)
+    sellPrice = Math.max(0.01, Math.min(0.99, bestBid));
+    logger.log(`   📊 Normal exit pricing: ${(sellPrice*100).toFixed(1)}¢ (at best bid)`);
   }
 
   const expectedRecovery = sharesToExit * sellPrice;
@@ -853,7 +879,9 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
         urgency: urgency,
         expectedRecovery: expectedRecovery,
         trackedShares: trackedShares,
-        actualShares: sharesToExit
+        actualShares: sharesToExit,
+        bestBid: bestBid,
+        bestAsk: bestAsk
       });
       
       // Update position to zero (we sold entire position)
