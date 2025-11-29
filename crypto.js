@@ -583,23 +583,28 @@ async function getActualPositions(userAddress, tokenIds, logger) {
     // Find positions matching our token IDs
     let upShares = 0;
     let downShares = 0;
-    
+    let upAvgPrice = 0;
+    let downAvgPrice = 0;
+
     for (const position of positions) {
       const asset = position.asset;
       const size = Number(position.size || 0);
+      const avgPrice = Number(position.avgPrice || 0);
       
       if (asset === upTokenId) {
         upShares = size;
+        upAvgPrice = avgPrice;
         logger.log(`   UP: ${size} shares @ avg $${position.avgPrice?.toFixed(3)}`);
       } else if (asset === downTokenId) {
         downShares = size;
+        downAvgPrice = avgPrice;
         logger.log(`   DOWN: ${size} shares @ avg $${position.avgPrice?.toFixed(3)}`);
       }
     }
     
     logger.log(`   Total: ${upShares} UP, ${downShares} DOWN`);
     
-    return { UP: upShares, DOWN: downShares };
+    return { UP: upShares, DOWN: downShares, upAvgPrice: upAvgPrice, downAvgPrice: downAvgPrice };
     
   } catch (err) {
     logger.error(`Failed to get actual positions: ${err.message}`);
@@ -738,23 +743,40 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
     logger.warn(`⚠️  Data API failed - proceeding with tracked position`);
     logger.warn(`   Tracked: ${trackedShares} ${side} shares`);
     logger.warn(`   Risk: May attempt to sell more than we have (exchange will reject gracefully)`);
-    // Continue with tracked shares - better to try and fail than not try at all
     sharesToExit = trackedShares;
   } else {
     // API returned data - verify it
     const actualShares = side === 'UP' ? actualPositions.UP : actualPositions.DOWN;
+    const avgEntryPrice = side === 'UP' ? actualPositions.upAvgPrice : actualPositions.downAvgPrice;  // 🆕 NEW
+    
+    // 🆕 NEW: Check if this exit would be profitable
+    if (reason.startsWith('profit_taking') && avgEntryPrice > 0) {
+      // Get the order book to see current price
+      const tokenOrderBook = side === 'UP' ? upBook : downBook;
+      const { bestBid } = getBestBidAsk(tokenOrderBook);
+      
+      if (bestBid) {
+        const potentialProfit = bestBid - avgEntryPrice;
+        
+        if (potentialProfit <= 0) {
+          logger.log(`⚠️  PROFIT-TAKING BLOCKED: Position not profitable!`);
+          logger.log(`   Avg entry: ${(avgEntryPrice*100).toFixed(1)}¢ | Best bid: ${(bestBid*100).toFixed(1)}¢`);
+          logger.log(`   Would lose ${(-potentialProfit*100).toFixed(1)}¢ per share`);
+          logger.log(`   Reason: Likely old bot's expensive shares - not touching them`);
+          return false;
+        }
+        
+        logger.log(`✅ Profit check passed: entry ${(avgEntryPrice*100).toFixed(1)}¢ → exit ~${(bestBid*100).toFixed(1)}¢ = +${(potentialProfit*100).toFixed(1)}¢/share`);
+      }
+    }
     
     // Check for discrepancy
     if (Math.abs(actualShares - trackedShares) > 5) {
       logger.warn(`⚠️  POSITION MISMATCH DETECTED!`);
       logger.warn(`   Tracked: ${trackedShares} ${side}`);
       logger.warn(`   Actual:  ${actualShares} ${side}`);
+      logger.warn(`   Avg entry: ${(avgEntryPrice*100).toFixed(1)}¢`);  // 🆕 NEW
       logger.warn(`   Difference: ${trackedShares - actualShares} shares (${((Math.abs(trackedShares - actualShares)) / Math.max(trackedShares, 1) * 100).toFixed(1)}%)`);
-      
-      // Decision logic:
-      // 1. If actual > 0, use actual (API is correct, fills came in)
-      // 2. If actual = 0 but tracked > 20, trust tracked (API may be stale)
-      // 3. If both small, abort (likely already exited)
       
       if (actualShares > 0) {
         logger.log(`   Using actual: ${actualShares} shares (API has real data)`);
@@ -765,7 +787,6 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
         logger.warn(`   If this fails, exchange will reject gracefully`);
         sharesToExit = trackedShares;
       } else {
-        // Both are small or actual=0 and tracked<20
         logger.warn(`⚠️  Both actual (${actualShares}) and tracked (${trackedShares}) small - likely already exited`);
         
         // Update state to match reality
@@ -778,7 +799,7 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
         return false;
       }
     } else {
-      logger.log(`✅ Position verified: ${actualShares} ${side} shares`);
+      logger.log(`✅ Position verified: ${actualShares} ${side} shares @ avg ${(avgEntryPrice*100).toFixed(1)}¢`);
       sharesToExit = actualShares;
     }
   }
@@ -801,14 +822,12 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
   exitDecision.shares = sharesToExit;
   
   // ========================================
-  // OPTIMIZED EXIT PRICING
+  // OPTIMIZED EXIT PRICING (rest stays the same)
   // ========================================
   
-  // Select the correct order book (UP or DOWN token)
   const tokenOrderBook = side === 'UP' ? upBook : downBook;
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
   
-  // Get best bid and ask from the SAME book
   const { bestBid, bestAsk } = getBestBidAsk(tokenOrderBook);
   
   if (!bestBid) {
@@ -816,24 +835,15 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
     return false;
   }
   
-  // Determine optimal sell price based on urgency and market conditions
   let sellPrice;
   
   if (urgency === 'emergency') {
-    // EMERGENCY: Sell aggressively to guarantee instant fill
-    // Go 2 ticks below best bid
     sellPrice = Math.max(0.01, Math.min(0.99, bestBid - 0.02));
     logger.log(`   🚨 Emergency pricing: ${(sellPrice*100).toFixed(1)}¢ (bid - 2¢)`);
     logger.log(`      Prioritizing speed over price`);
     
   } else if (bestAsk && bestAsk >= 0.95) {
-    // EXPENSIVE POSITION (>95¢): Optimize for maximum value
-    // The spread is usually tight here, and that 1-2¢ represents most of our profit!
-    // Try to sell closer to the mid-point instead of giving away free money
-    
     const spreadMid = (bestBid + bestAsk) / 2;
-    
-    // Sell at mid-point, but never below best bid
     sellPrice = Math.max(bestBid, Math.min(0.99, spreadMid));
     
     logger.log(`   💰 Expensive exit optimization:`);
@@ -842,7 +852,6 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
     logger.log(`      Improvement: ${((sellPrice - (bestBid-0.01))*100).toFixed(1)}¢ per share`);
     
   } else {
-    // NORMAL EXIT: Sell at best bid (instant fill, no giveaway)
     sellPrice = Math.max(0.01, Math.min(0.99, bestBid));
     logger.log(`   📊 Normal exit pricing: ${(sellPrice*100).toFixed(1)}¢ (at best bid)`);
   }
@@ -858,15 +867,14 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
     const resp = await client.createAndPostOrder({
       tokenID: tokenId,
       price: sellPrice.toFixed(2),
-      side: Side.SELL,  // CRITICAL: Use SELL not BUY
+      side: Side.SELL,
       size: sharesToExit,
-      expiration: String(Math.floor(Date.now()/1000) + 300) // 5 min expiry
+      expiration: String(Math.floor(Date.now()/1000) + 300)
     }, { tickSize: "0.01", negRisk: false }, OrderType.GTD);
     
     if (resp && resp.orderID) {
       logger.log(`✅ Exit order placed successfully: ${resp.orderID}`);
       
-      // Log the exit order
       logOrderAttempt({
         ts: Date.now(),
         symbol: asset.symbol,
@@ -884,14 +892,12 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
         bestAsk: bestAsk
       });
       
-      // Update position to zero (we sold entire position)
       if (side === 'UP') {
         state.sideSharesBySlug[slug].UP = 0;
       } else {
         state.sideSharesBySlug[slug].DOWN = 0;
       }
       
-      // Clear entry Z since we've exited the position
       state.entryZ = null;
       state.minZSinceEntry = null;
       state.exitTimestamp = Date.now();
