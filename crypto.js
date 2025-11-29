@@ -58,13 +58,14 @@ const ASSETS = [
 ];
 
 const BASIS_BUFFER_BPS = {
-  BTC: 5,   // 0.05% (~$45 at $90k)
-  ETH: 7,   // 0.07%
-  SOL: 7,   // 0.07%
+  BTC: 5,
+  ETH: 7,
+  SOL: 7,
   XRP: 7
 };
 
 const MAX_PRICE_BY_TIME = {
+  8: 0.86,
   5: 0.90,   // >5 mins
   3: 0.93,   // 3-5 mins
   2: 0.95,   // 2-3 mins
@@ -104,6 +105,7 @@ const MIN_EDGE_EARLY = 0.03;
 const MIN_EDGE_LATE  = 0.02;
 
 // EARLY TRADING CONFIG (5-15 mins left)
+const OVERRIDE_US_TRADING_HOURS = true; // Toggle to trade early even during US hours
 const ENABLE_EARLY_TRADING = true; // Toggle this to enable/disable early trading
 const MAX_SHARES_WEAK_SIGNAL = 70;
 
@@ -111,20 +113,11 @@ const MAX_SHARES_WEAK_SIGNAL = 70;
 const REGIME_SCALAR_MIN = 0.7; // Don't make thresholds too high in low vol
 const REGIME_SCALAR_MAX = 1.4; // Don't make thresholds too low in high vol
 
-// Limits for dynamicZMax (time-based momentum filter)
-const Z_MAX_FAR_MINUTES = 6;
-const Z_MAX_NEAR_MINUTES = 3;
-const Z_MAX_FAR = 2.5;
-const Z_MAX_NEAR = 1.7;
-
 // Extreme late-game constants
 const Z_HUGE = 2.8; // Requires ~99.7% probability
 const LATE_GAME_EXTREME_SECS = 8;
 const LATE_GAME_MIN_EV = 0.01;
-const LATE_GAME_MAX_PRICE = 0.98;
-
-// Early trading size reduction (>5 mins left)
-const EARLY_TRADE_SIZE_MULTIPLIER = 0.4; // 40% of normal size for very early trades
+const LATE_GAME_MAX_PRICE = 0.97;
 
 // Risk bands
 const PRICE_MIN_CORE = 0.90; const PROB_MIN_CORE  = 0.97;
@@ -296,14 +289,22 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   if (minsLeft >= 2) {
     return { safe: true, reason: "Not in danger zone" };
   }
-  
+
   const distBps = (Math.abs(currentPrice - startPrice) / startPrice) * 10000;
-  const minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
+  let minSafeDist = BASIS_BUFFER_BPS[asset.symbol] || 10;
+  // TODO: consider removing this
+  if (Math.abs(z) > 1.5) {
+    minSafeDist *= 0.5;
+  } else if (Math.abs(z) > 1.2) {
+    minSafeDist *= 0.75;
+  } else if (Math.abs(z) > 0.8) {
+    minSafeDist *= 0.9;
+  }
   
   if (distBps >= minSafeDist) {
     return { safe: true, reason: `Far from strike: ${distBps.toFixed(1)}bps` };
   }
-  
+
   // In danger zone - apply strict rules
   const priceIsAboveStrike = currentPrice > startPrice;
   const absZ = Math.abs(z);
@@ -311,7 +312,7 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   // Calculate edge for both directions
   const upEdge = upAsk ? pUp - upAsk : 0;
   const downEdge = downAsk ? pDown - downAsk : 0;
-  
+
   if (priceIsAboveStrike) {
     // Price above strike - UP is safer, DOWN is dangerous
     if (z > 0 && upEdge > 0.05) {
@@ -343,11 +344,14 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
       return { safe: false, reason: "Against direction in danger zone" };
     }
   }
-  
-  return { safe: true, reason: "No clear signal" };
+
+  logger.log(`🚫 BASIS RISK: Danger zone (${distBps.toFixed(1)}bps) with poor edge`);
+  return { safe: false, reason: "Danger zone with insufficient edge" };
+  // return { safe: true, reason: "No clear signal" };
 }
 
 function getMaxPriceForTime(minsLeft) {
+  if (minsLeft > 8) return MAX_PRICE_BY_TIME[8];
   if (minsLeft > 5) return MAX_PRICE_BY_TIME[5];
   if (minsLeft > 3) return MAX_PRICE_BY_TIME[3];
   if (minsLeft > 2) return MAX_PRICE_BY_TIME[2];
@@ -486,6 +490,66 @@ function shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft
     };
   }
   
+  return { shouldExit: false };
+}
+
+function shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, logger) {
+  const slug = state.slug;
+
+  if (sharesUp === 0 && sharesDown === 0) {
+    return { shouldExit: false };
+  }
+
+  const side = sharesUp > 0 ? 'UP' : 'DOWN';
+  const shares = sharesUp > 0 ? sharesUp : sharesDown;
+  const currentAsk = side === 'UP' ? upAsk : downAsk;
+
+  if (!currentAsk) return { shouldExit: false };
+
+  // RULE 1: Always exit at 99¢+ (only 1¢ upside left)
+  if (currentAsk >= 0.99) {
+    logger.log(`💰 PROFIT TAKING: Price ${(currentAsk*100).toFixed(0)}¢ - only 1¢ upside left`);
+    return {
+      shouldExit: true,
+      reason: 'profit_taking_max_price',
+      side: side,
+      shares: shares,
+      urgency: 'normal'
+    };
+  }
+
+  // RULE 2: Exit at 97¢+ if signal weakened
+  if (currentAsk >= 0.97 && Math.abs(z) < 1.5) {
+    logger.log(`💰 PROFIT TAKING: Price ${(currentAsk*100).toFixed(0)}¢ with weak signal z=${z.toFixed(2)}`);
+    logger.log(`   Expensive position + weak signal = reversal risk`);
+    return {
+      shouldExit: true,
+      reason: 'profit_taking_weak_signal',
+      side: side,
+      shares: shares,
+      urgency: 'normal'
+    };
+  }
+
+  // RULE 3: Exit at 95¢+ if <1 min with poor risk/reward
+  if (minsLeft < 1 && currentAsk >= 0.95) {
+    const risking = currentAsk;
+    const gaining = 1.00 - currentAsk;
+    const ratio = risking / gaining;
+
+    if (ratio > 15) {
+      logger.log(`💰 PROFIT TAKING: R/R ${ratio.toFixed(1)}:1 with ${(minsLeft*60).toFixed(0)}s left`);
+      logger.log(`   Risking ${(risking*100).toFixed(0)}¢ to gain ${(gaining*100).toFixed(0)}¢ - not worth it`);
+      return {
+        shouldExit: true,
+        reason: 'profit_taking_rr',
+        side: side,
+        shares: shares,
+        urgency: 'normal'
+      };
+    }
+  }
+
   return { shouldExit: false };
 }
 
@@ -636,7 +700,7 @@ async function reconcilePositions(state, logger) {
         logger.warn(`   Will reconcile after orders complete or on next cycle`);
         return;
       }
-      
+
       if (shouldReconcile) {
         logger.log(`✅ Reconciling: ${reconcileReason}`);
         state.sideSharesBySlug[slug] = { UP: actual.UP, DOWN: actual.DOWN };
@@ -801,8 +865,15 @@ async function executeExit(asset, state, exitDecision, upBook, downBook, logger)
       
       // Clear entry Z since we've exited the position
       state.entryZ = null;
+      state.minZSinceEntry = null;
       state.exitTimestamp = Date.now();
-      
+
+      const pos = state.sideSharesBySlug[slug];
+      if (pos.UP === 0 && pos.DOWN === 0) {
+        state.sharesBoughtBySlug[slug] = 0;
+        logger.log(`✅ Full exit - reset bought counter`);
+      }
+
       return true;
     }
   } catch (err) {
@@ -857,14 +928,6 @@ function getTimeDecayFactor(minsLeft) {
   // Increase vol by up to 40% in final 30 seconds
   const t = Math.max(0, Math.min(1, (30 - secsLeft) / 30));
   return 1.0 + t * 0.4; // 1.0 -> 1.4
-}
-
-// Time-based momentum filter
-function dynamicZMax(minsLeft) {
-  if (minsLeft >= Z_MAX_FAR_MINUTES) return Z_MAX_FAR;
-  if (minsLeft <= Z_MAX_NEAR_MINUTES) return Z_MAX_NEAR;
-  const t = (Z_MAX_FAR_MINUTES - minsLeft) / (Z_MAX_FAR_MINUTES - Z_MAX_NEAR_MINUTES);
-  return Z_MAX_FAR - t * (Z_MAX_FAR - Z_MAX_NEAR);
 }
 
 function canPlaceOrder(state, slug, side, size, assetSymbol) {
@@ -924,7 +987,7 @@ function isUSTradingHours(date = new Date()) {
   const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
   const isInTimeRange = totalMins >= 13 * 60 + 45 && totalMins < 20 * 60 + 30;
   
-  return isWeekday && isInTimeRange;
+  return !OVERRIDE_US_TRADING_HOURS && isWeekday && isInTimeRange;
 }
 
 // Logging
@@ -965,11 +1028,6 @@ function sizeForTrade(ev, minsLeft, opts = {}) {
 
   let size = BASE_MIN + evNorm * (BASE_MAX - BASE_MIN);
   size = Math.round((size * timeFactor) / 10) * 10;
-  
-  // Apply early trading size reduction if >5 mins left
-  if (minsLeft > 5) {
-    size = Math.round((size * EARLY_TRADE_SIZE_MULTIPLIER) / 10) * 10;
-  }
   
   return Math.min(size, ABS_MAX);
 }
@@ -1055,7 +1113,9 @@ function ensureState(asset, logger) {
       entryZ: null,  // Store entry z-score for reversal detection
       exitTimestamp: null,  // NEW in v2.4.0: Track when we last exited
       weakSignalCount: 0,
-      weakSignalHistory: []
+      weakSignalHistory: [],
+      liquidityHistory: [],
+      minZSinceEntry: null
     };
     console.log(`[${asset.symbol}] Reset state for ${slug}`);
 
@@ -1110,6 +1170,10 @@ async function execForAsset(asset, priceData) {
     if (minsLeft < 0.01) {
       state.resetting = true;
       logger.log(`Interval over. Resetting...`);
+
+      state.sharesBoughtBySlug[slug] = 0;
+      logger.log(`✅ Market expired - reset bought counter to 0`);
+
       await sleep(30_000);
       stateBySymbol[asset.symbol] = null;
       return;
@@ -1154,18 +1218,18 @@ async function execForAsset(asset, priceData) {
     // 4) Volatility & Drift
     let rawSigmaPerMin = VolatilityManager.getRealizedVolatility(asset.symbol, currentPrice);
     const drift = estimateDrift(asset.symbol, 60);
-    
+
     const effectiveSigma = rawSigmaPerMin * getTimeDecayFactor(minsLeft);
     const volRatio = VolatilityManager.getVolRegimeRatio(asset.symbol, rawSigmaPerMin);
-    
+
     // Regime scalar clamped to prevent extreme adjustments
     const rawRegimeScalar = Math.sqrt(volRatio);
     const regimeScalar = Math.max(REGIME_SCALAR_MIN, Math.min(REGIME_SCALAR_MAX, rawRegimeScalar));
 
     const sigmaT = effectiveSigma * Math.sqrt(minsLeft);
-    
+
     // Include drift in z-score calculation
-    const z = (currentPrice - startPrice - drift * minsLeft) / sigmaT;
+    const z = (currentPrice - startPrice + drift * minsLeft) / sigmaT;
     if (!state.zHistory) state.zHistory = [];
     state.zHistory.push({ z, ts: Date.now() });
     state.zHistory = state.zHistory.filter(h => Date.now() - h.ts < 30000);
@@ -1199,11 +1263,46 @@ async function execForAsset(asset, priceData) {
     const existingSide = getExistingSide(state, slug);
     logger.log(`Existing net side: ${existingSide || "FLAT"}`);
 
+    const pos = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
+    const totalBought = state.sharesBoughtBySlug[slug] || 0;
+    const netPosition = pos.UP - pos.DOWN;
+
+    logger.log(`📊 POSITION DEBUG:`);
+    logger.log(`   sideSharesBySlug[${slug}]: UP=${pos.UP}, DOWN=${pos.DOWN}`);
+    logger.log(`   sharesBoughtBySlug[${slug}]: ${totalBought}`);
+    logger.log(`   Net position: ${netPosition} (${netPosition > 0 ? 'UP' : netPosition < 0 ? 'DOWN' : 'FLAT'})`);
+    logger.log(`   Cap: ${totalBought}/${MAX_SHARES_PER_MARKET[asset.symbol]}`);
+
+    // Also log all slugs in state:
+    logger.log(`   All tracked slugs: ${Object.keys(state.sharesBoughtBySlug).join(', ')}`);
+
     const sharesUp = state.sideSharesBySlug[slug]?.UP || 0;
     const sharesDown = state.sideSharesBySlug[slug]?.DOWN || 0;
 
     if (sharesUp > 0 && pUp < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding UP but pUp=${pUp.toFixed(4)}`);
     if (sharesDown > 0 && pDown < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding DOWN but pDown=${pDown.toFixed(4)}`);
+
+    // Detect rapid liquidity drain (early warning signal)
+    // if (!state.liquidityHistory) state.liquidityHistory = [];
+
+    // const currentLiquidity = {
+    //   upDepth: upBook.asks?.reduce((sum, o) => sum + Number(o.size), 0) || 0,
+    //   downDepth: downBook.asks?.reduce((sum, o) => sum + Number(o.size), 0) || 0,
+    //   ts: Date.now()
+    // };
+
+    // state.liquidityHistory.push(currentLiquidity);
+    // state.liquidityHistory = state.liquidityHistory.filter(l => Date.now() - l.ts < 30000);
+
+    // if (state.liquidityHistory.length >= 3) {
+    //   const oldest = state.liquidityHistory[0];
+    //   const current = currentLiquidity;
+
+    //   if (z > 0 && current.upDepth < oldest.upDepth * 0.5) {
+    //     logger.log(`⚠️  LIQUIDITY ALERT: UP depth dropped ${((1 - current.upDepth/oldest.upDepth)*100).toFixed(0)}% in 30s`);
+    //     logger.log(`   This suggests strong buying pressure - consider early entry`);
+    //   }
+    // }
 
     // ==============================================
     // NEW in v2.4.0: RECONCILE POSITIONS (if we have any)
@@ -1220,13 +1319,14 @@ async function execForAsset(asset, priceData) {
     // ==============================================
     
     const exitCheck = shouldExitPosition(state, z, pUp, pDown, sharesUp, sharesDown, minsLeft, logger);
-    
     if (exitCheck.shouldExit) {
       logger.log(`🚨 EXIT CONDITION MET - Attempting to close position`);
       
       const exitSuccess = await executeExit(asset, state, exitCheck, upBook, downBook, logger);
       
       if (exitSuccess) {
+        state.weakSignalHistory = [];
+        state.weakSignalCount = 0;
         logger.log(`✅ Position exited successfully - Stopping further trading this tick`);
         return; // Don't trade for rest of this tick
       } else {
@@ -1236,19 +1336,25 @@ async function execForAsset(asset, priceData) {
       }
     }
 
+    const profitCheck = shouldTakeProfits(state, upAsk, downAsk, minsLeft, z, sharesUp, sharesDown, logger);
+    if (profitCheck.shouldExit) {
+      logger.log(`💰 PROFIT TAKING TRIGGERED - Attempting to close position`);
+
+      const exitSuccess = await executeExit(asset, state, profitCheck, upBook, downBook, logger);
+
+      if (exitSuccess) {
+        state.weakSignalHistory = [];
+        state.weakSignalCount = 0;
+        logger.log(`✅ Profits secured - Stopping further trading this tick`);
+        return;
+      } else {
+        logger.warn(`⚠️  Profit-taking exit failed - Will retry next tick`);
+        return;
+      }
+    }
+
     if (minsLeft < 0.15) { // ~10 seconds
       logger.log(`🛑 ULTRA LATE: ${(minsLeft * 60).toFixed(0)}s left - no trading`);
-      return;
-    }
-
-    // Continue with normal trading logic if no exit needed...
-    if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
-      logger.log(`⛔ Weak signal position limit: ${sharesUp} shares with z=${z.toFixed(2)}`);
-      return;
-    }
-
-    if (z < 0 && z > -0.8 && sharesDown >= MAX_SHARES_WEAK_SIGNAL) {
-      logger.log(`⛔ Weak signal position limit: ${sharesDown} shares with z=${z.toFixed(2)}`);
       return;
     }
 
@@ -1269,7 +1375,6 @@ async function execForAsset(asset, priceData) {
     // ==============================================
     
     const absZ = Math.abs(z);
-    const zMaxTimeBased = dynamicZMax(minsLeft);
     let effectiveZMin;
 
     const isUS = isUSTradingHours();
@@ -1281,8 +1386,10 @@ async function execForAsset(asset, priceData) {
         effectiveZMin = 1.9 * regimeScalar; // Kinda early: still strict
       } else if (minsLeft > 5) {
         effectiveZMin = 1.6 * regimeScalar; // Very early: strict
+      } else if (minsLeft > 4) {
+        effectiveZMin = 1.2 * regimeScalar;
       } else if (minsLeft > 3) {
-        effectiveZMin = 1.3 * regimeScalar; // Mid early: moderate
+        effectiveZMin = 1.1 * regimeScalar; // Mid early: moderate
       } else if (minsLeft > 2) {
         effectiveZMin = 0.9 * regimeScalar; // Getting close: normal
       } else {
@@ -1307,12 +1414,11 @@ async function execForAsset(asset, priceData) {
     // RESTORED: Low-Vol Boost
     // In calm markets, signals are more reliable → trade more aggressively
     // ==============================================
-    
     if (rawRegimeScalar < 1.1) {
       const LOW_VOL_BOOST = 0.85; // 15% easier in low vol
       const oldThreshold = effectiveZMin;
       effectiveZMin *= LOW_VOL_BOOST;
-      
+
       logger.log(`[Low Vol Regime] Threshold reduced: ${oldThreshold.toFixed(2)} → ${effectiveZMin.toFixed(2)} (${((1-LOW_VOL_BOOST)*100).toFixed(0)}% easier)`);
     }
 
@@ -1398,9 +1504,15 @@ async function execForAsset(asset, priceData) {
         
         // Large reversal (>1σ)?
         if (reversalMagnitude > 1.0) {
-          logger.log(`⚠️  SIGNAL REVERSAL: z=${oldZ.toFixed(2)} → ${newZ.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
-          logger.log(`⛔ EXIT: Large signal reversal, stopping all trading`);
-          return;
+          logger.log(`⚠️  SIGNAL REVERSAL: z=${oldZ.toFixed(2)} → ${newZ.toFixed(2)}`);
+
+          // Only block if we have position in OLD direction
+          if ((oldSign > 0 && sharesUp > 0) || (oldSign < 0 && sharesDown > 0)) {
+            logger.log(`⛔ Blocking: would add to losing ${oldSign > 0 ? 'UP' : 'DOWN'} position`);
+            return;
+          }
+
+          logger.log(`✅ Allowing reversal trade in ${newSign > 0 ? 'UP' : 'DOWN'} direction`);
         }
       }
     }
@@ -1427,11 +1539,37 @@ async function execForAsset(asset, priceData) {
     }
 
     // 7) Trade Logic - Directional
-    let candidates = [];
+    // EXPERIMENT: Keep track
+    let zVelocity = 0;
+    let cappedPredictedZ = z; // Default to current z
+    if (state.zHistory.length >= 3) {
+      const recent = state.zHistory.slice(-3);
+      const timeSpan = (recent[2].ts - recent[0].ts) / 1000; // seconds
+      const zChange = recent[2].z - recent[0].z;
+      zVelocity = zChange / timeSpan;
 
+      // Predict where z will be in 20 seconds
+      const predictedZ = z + (zVelocity * 20);
+      const maxPrediction = Math.abs(z) + 2.0; // Can't predict more than +2σ from current
+      cappedPredictedZ = Math.sign(predictedZ) * Math.min(Math.abs(predictedZ), maxPrediction);
+
+      logger.log(`💭 Prediction: z=${z.toFixed(2)}, velocity=${zVelocity.toFixed(3)}/s, predicted20s=${predictedZ.toFixed(2)}${predictedZ !== cappedPredictedZ ? ` (capped to ${cappedPredictedZ.toFixed(2)})` : ''}`);
+
+      // Lower threshold if strong upward trajectory
+      const minVelocity = 0.05; // Must be moving at least 0.05 z-score per second 
+      if (Math.abs(cappedPredictedZ) > 2.0 &&
+          Math.sign(cappedPredictedZ) === Math.sign(z) &&
+          Math.abs(zVelocity) > minVelocity) {
+        const originalZMin = effectiveZMin;
+        effectiveZMin *= 0.85;
+        logger.log(`📈 Strong trajectory detected: threshold ${originalZMin.toFixed(2)} → ${effectiveZMin.toFixed(2)}`);
+      }
+    }
+
+    let candidates = [];
     if (z >= effectiveZMin && upAsk) {
       const evBuyUp = pUp - upAsk;
-      logger.log(`Up ask=${upAsk.toFixed(3)}, EV buy Up=${evBuyUp.toFixed(4)}`);
+      logger.log(`Up ask=${upAsk.toFixed(3)}, pUp=${pUp}, EV buy Up=${evBuyUp.toFixed(4)}`);
       candidates.push({ side: "UP", ev: evBuyUp, ask: upAsk });
     } else {
       logger.log(`We don't buy Up here (z=${z.toFixed(3)} < ${effectiveZMin.toFixed(2)} or no ask).`);
@@ -1439,7 +1577,7 @@ async function execForAsset(asset, priceData) {
 
     if (z <= -effectiveZMin && downAsk) {
       const evBuyDown = pDown - downAsk;
-      logger.log(`Down ask=${downAsk.toFixed(3)}, EV buy Down=${evBuyDown.toFixed(4)}`);
+      logger.log(`Down ask=${downAsk.toFixed(3)}, pDown=${pDown}, EV buy Down=${evBuyDown.toFixed(4)}`);
       candidates.push({ side: "DOWN", ev: evBuyDown, ask: downAsk });
     } else {
       logger.log(`We don't buy Down here (z=${z.toFixed(3)} > ${-effectiveZMin.toFixed(2)} or no ask).`);
@@ -1466,31 +1604,70 @@ async function execForAsset(asset, priceData) {
       return c.ev > required;
     });
 
+    if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
+      logger.log(`⚠️  Weak signal position limit: ${sharesUp} UP shares`);
+      // Only allow DOWN (hedge)
+      candidates = candidates.filter(c => c.side === 'DOWN');
+      if (candidates.length === 0) return;
+    }
+
+    if (z < 0 && z > -0.8 && sharesDown >= MAX_SHARES_WEAK_SIGNAL) {
+      logger.log(`⚠️  Weak signal position limit: ${sharesDown} DOWN shares`);
+      // Only allow UP (hedge)
+      candidates = candidates.filter(c => c.side === 'UP');
+      if (candidates.length === 0) return;
+    }
+
     // ============================================================
     // LATE GAME MODE (SIGNAL-AWARE)
     // ============================================================
-    
-    if (absZ > zMaxTimeBased || minsLeft < 2) {
+    if (minsLeft < 2) {
       // ==============================================
       // Signal-Aware LATE_LAYER
       // Check if signal has reversed since entry
       // ==============================================
       
-      const entrySignal = state.entryZ || z;
-      const currentSignal = z;
+      if (state.entryZ !== null) {
+        const entrySignal = state.entryZ;
+        const currentSignal = z;
 
-      const signalFlipped = Math.sign(entrySignal) !== Math.sign(currentSignal) 
-                            && Math.sign(entrySignal) !== 0 
-                            && Math.sign(currentSignal) !== 0;
+        const signalFlipped = Math.sign(entrySignal) !== Math.sign(currentSignal) 
+                              && Math.sign(entrySignal) !== 0 
+                              && Math.sign(currentSignal) !== 0;
+        
+        const reversalMagnitude = Math.abs(currentSignal - entrySignal);
+        const largeReversal = reversalMagnitude > 1.0;
 
-      const reversalMagnitude = Math.abs(currentSignal - entrySignal);
-      
-      // BUG FIX #1: Lowered threshold from 1.5σ to 1.0σ to match main detector
-      const largeReversal = reversalMagnitude > 1.0;
+        if (signalFlipped && largeReversal) {
+          logger.log(`⛔ LATE_LAYER BLOCKED: Signal reversed ${entrySignal.toFixed(2)} → ${currentSignal.toFixed(2)}`);
+          return;
+        }
+      }
 
-      if (signalFlipped && largeReversal) {
-        logger.log(`⛔ LATE_LAYER BLOCKED: Signal reversed ${entrySignal.toFixed(2)} → ${currentSignal.toFixed(2)} (Δ=${reversalMagnitude.toFixed(2)}σ)`);
-        return;
+      if (minsLeft > 1.5 && state.zHistory && state.zHistory.length >= 3) {
+        const recent30s = state.zHistory.filter(h => Date.now() - h.ts < 30000);
+        
+        if (recent30s.length >= 3) {
+          const oldestZ = Math.abs(recent30s[0].z);
+          const currentZ = Math.abs(z);
+          const timeSpan = (Date.now() - recent30s[0].ts) / 1000;
+          
+          // Signal increased >50% in last 30 seconds?
+          if (currentZ > oldestZ * 1.5 && oldestZ > 0.3) {
+            const percentIncrease = ((currentZ - oldestZ) / oldestZ * 100);
+
+            logger.log(`⚠️  SIGNAL SPIKE DETECTED`);
+            logger.log(`   z: ${oldestZ.toFixed(2)} → ${currentZ.toFixed(2)} (+${percentIncrease.toFixed(0)}%) in ${timeSpan.toFixed(0)}s`);
+
+            // Only block if we already have shares (prevents adding to spike)
+            if (sharesUp + sharesDown > 0) {
+              logger.log(`⛔ Skipping entry - spikes often reverse (mean reversion risk)`);
+              return;
+            }
+            
+            logger.log(`   Exception: No position yet, allowing cautious entry`);
+          }
+        }
       }
 
       // ==============================================
@@ -1499,7 +1676,12 @@ async function execForAsset(asset, priceData) {
 
       const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
       const secsLeft = minsLeft * 60;
-      const pReq = requiredLateProb(secsLeft);
+      let pReq = requiredLateProb(secsLeft);
+      if (Math.abs(cappedPredictedZ) > 2.5 && Math.abs(zVelocity) > 0.05) {
+        const originalPReq = pReq;
+        pReq *= 0.95; // 5% easier (85% → 80.75%)
+        logger.log(`📈 LATE_LAYER trajectory: pReq ${originalPReq.toFixed(3)} → ${pReq.toFixed(3)}`);
+      }
 
       let lateSide = null, sideProb = 0, sideAsk = 0;
 
@@ -1513,14 +1695,60 @@ async function execForAsset(asset, priceData) {
         sideAsk = downAsk || 0.99; 
       }
 
+      // TODO: remove this if using ORACLE_SIGMA_MULTIPLE below
+      if (minsLeft < 2 && minsLeft > 0.5 && sideAsk > 0.85) {
+        // Require price to be at least 0.5 sigma away from strike
+        const minDistanceRequired = 0.5 * rawSigmaPerMin * Math.sqrt(minsLeft);
+        const actualDistance = Math.abs(currentPrice - startPrice);
+
+        if (actualDistance < minDistanceRequired) {
+          logger.log(`⛔ THIN MARGIN: $${actualDistance.toFixed(2)} < $${minDistanceRequired.toFixed(2)} (0.5σ at ${minsLeft.toFixed(1)}m)`);
+          logger.log(`   Too close to strike for expensive late entry`);
+          return;
+        } else {
+          logger.log(`✅ Margin OK: $${actualDistance.toFixed(2)} > $${minDistanceRequired.toFixed(2)} (${(actualDistance/minDistanceRequired).toFixed(1)}σ)`);
+        }
+      }
+
       if (lateSide) {
+        // Time-graduated maximum prices for LATE_LAYER
+        // Stricter caps as we get closer to expiry (higher gamma risk)
+        let lateGameMax;
+        if (minsLeft < 0.5) {
+          lateGameMax = 0.85;  // <30s: very strict (need 85%+ win rate)
+        } else if (minsLeft < 1.0) {
+          lateGameMax = 0.88;  // <1min: strict (need 88%+ win rate)
+        } else if (minsLeft < 1.5) {
+          lateGameMax = 0.92;  // <90s: moderate (need 92%+ win rate)
+        } else {
+          lateGameMax = LATE_GAME_MAX_PRICE;  // <2min: 95¢ (need 95%+ win rate)
+        }
+        if (sideAsk > lateGameMax) {
+          logger.log(`⛔ LATE GAME: ${(sideAsk*100).toFixed(0)}¢ > ${(lateGameMax*100).toFixed(0)}¢ max @ ${(minsLeft*60).toFixed(0)}s left`);
+          logger.log(`   ${asset.symbol}: Too close to expiry for expensive bets`);
+          return;
+        }
+
+        // TODO: consider enabling this
+        // const ORACLE_SIGMA_MULTIPLE = 2.0;
+        // const expectedMovement = ORACLE_SIGMA_MULTIPLE * rawSigmaPerMin * Math.sqrt(minsLeft);
+        // const absDistanceFromStrike = Math.abs(currentPrice - startPrice);
+
+        // if (absDistanceFromStrike < expectedMovement) {
+        //   logger.log(`⛔ ORACLE RISK: Only $${absDistanceFromStrike.toFixed(2)} from strike`);
+        //   logger.log(`   Need ${expectedMovement.toFixed(2)} buffer (${ORACLE_SIGMA_MULTIPLE}σ × $${rawSigmaPerMin.toFixed(2)}/min × √${minsLeft.toFixed(2)}min)`);
+        //   logger.log(`   ${asset.symbol}: Too close for oracle deviation safety`);
+        //   return;
+        // }
+        // logger.log(`✅ Oracle safe: $${absDistanceFromStrike.toFixed(2)} > ${expectedMovement.toFixed(2)} required buffer`);
+
         // 1. EXTREME SIGNAL - Kelly Criterion sizing
         let zHugeDynamic = Math.min(2.8, Z_HUGE * regimeScalar); // Capped at 2.8
         
         // RESTORED: Apply low-vol adjustment to extreme threshold
         if (rawRegimeScalar < 1.1) {
           const oldZHuge = zHugeDynamic;
-          zHugeDynamic *= 0.90; // 10% easier in low vol
+          zHugeDynamic *= 0.95; // 5% easier in low vol
           logger.log(`[Low Vol] Extreme threshold: ${oldZHuge.toFixed(2)} → ${zHugeDynamic.toFixed(2)}`);
         }
         
@@ -1601,39 +1829,56 @@ async function execForAsset(asset, priceData) {
         
         const totalShares = sharesUp + sharesDown;
         if (totalShares >= 200) {
-          const entrySignalForCap = state.entryZ || z;
-          const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
-          const entryStrength = Math.abs(entrySignalForCap);
-
-          // CRITICAL: Check if signal flipped sign FIRST
-          const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
-
-          if (!sameSign) {
-            // Signal reversed - always block regardless of magnitude
-            logger.log(`⛔ LATE_LAYER CAP: Signal reversed ${entrySignalForCap.toFixed(2)} → ${currentSignalForCap.toFixed(2)}`);
-            return;
+          if (state.entryZ !== null) {
+            const entrySignalForCap = state.entryZ;
+            const currentSignalForCap = z;  // Don't use Math.abs() - we need the sign!
+            const entryStrength = Math.abs(entrySignalForCap);
+            
+            // CRITICAL: Check if signal flipped sign FIRST
+            const sameSign = Math.sign(entrySignalForCap) === Math.sign(currentSignalForCap);
+            if (!sameSign) {
+              // Signal reversed - always block regardless of magnitude
+              logger.log(`⛔ LATE_LAYER CAP: Signal reversed ${entrySignalForCap.toFixed(2)} → ${currentSignalForCap.toFixed(2)}`);
+              return;
+            }
+            
+            // 🆕 WHIPSAW DETECTION: Track weakest signal since entry
+            // Initialize minZSinceEntry on first check
+            if (state.minZSinceEntry === undefined || state.minZSinceEntry === null) {
+              state.minZSinceEntry = entrySignalForCap;
+            }
+            
+            // Update minimum if current signal is weaker (closer to zero)
+            if (Math.abs(currentSignalForCap) < Math.abs(state.minZSinceEntry)) {
+              state.minZSinceEntry = currentSignalForCap;
+              logger.log(`📊 New weakest signal: ${currentSignalForCap.toFixed(2)} (entry: ${entrySignalForCap.toFixed(2)})`);
+            }
+            
+            // Check if signal EVER dropped >30% (even if it recovered)
+            const worstWeakening = (entryStrength - Math.abs(state.minZSinceEntry)) / entryStrength;
+            
+            if (worstWeakening > 0.3) {
+              logger.log(`⛔ LATE_LAYER CAP: Signal dropped ${(worstWeakening*100).toFixed(0)}% since entry (WHIPSAW)`);
+              logger.log(`   Entry: ${entrySignalForCap.toFixed(2)} → Lowest: ${state.minZSinceEntry.toFixed(2)} → Current: ${currentSignalForCap.toFixed(2)}`);
+              return;
+            }
+            
+            // Also check current weakening (your original check - keep this as backup)
+            const currentStrength = Math.abs(currentSignalForCap);
+            const currentWeakening = (entryStrength - currentStrength) / entryStrength;
+            
+            if (currentWeakening > 0.3) {
+              logger.log(`⛔ LATE_LAYER CAP: Signal currently weak ${(currentWeakening*100).toFixed(0)}% (${totalShares} shares)`);
+              return;
+            }
           }
-
-          // Same sign - check if weakening
-          const currentStrength = Math.abs(currentSignalForCap);
-          const signalWeakening = (entryStrength - currentStrength) / entryStrength;
-
-          if (signalWeakening > 0.3) {
-            logger.log(`⛔ LATE_LAYER CAP: Signal weakened ${(signalWeakening*100).toFixed(0)}% (${totalShares} shares)`);
-            return;
-          }
-
-          // Signal still strong but position large, cap at 400
-          // if (totalShares >= 400) {
-          //   logger.log(`⛔ LATE_LAYER CAP: Max position (${totalShares} shares)`);
-          //   return;
-          // }
         }
 
         // 2. HYBRID LAYERED MODEL
         const LAYER_OFFSETS = [-0.02, -0.01, 0.0, +0.01];
         // const LAYER_MIN_EV = [0.006, 0.004, 0.002, 0.000];
-        const LAYER_MIN_EV = [0.003, 0.002, 0.001, 0.000];
+        // const LAYER_MIN_EV = [0.003, 0.002, 0.001, 0.001];
+        const LAYER_MIN_EV = [0.001, 0.002, 0.003, 0.005];
 
         let edgePenalty = 0;
         // if (asset.symbol === "SOL") {
@@ -1651,15 +1896,22 @@ async function execForAsset(asset, priceData) {
 
         for (let i = 0; i < LAYER_OFFSETS.length; i++) {
           let target = sideAsk + LAYER_OFFSETS[i];
-          target = Math.max(0.01, Math.min(target, 0.99));
+          target = Math.max(0.01, Math.min(target, lateGameMax));
 
           // Only checked for early LATE_LAYER (>3 mins) - prevents expensive bets with lots of reversal time
           // Late game LATE_LAYER (<3 mins) has no max price cap - trust the proven signal
-          const maxPrice = getMaxPriceForTime(minsLeft);
-          if (minsLeft > MINUTES_LEFT && target > maxPrice) {
-            logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
-            continue;
-          }
+          // TODO: consider using this
+          // const maxPrice = getMaxPriceForTime(minsLeft);
+          // const isExtremeSignal = absZ > 2.2;
+          // if (minsLeft > MINUTES_LEFT) {
+          //   if (isExtremeSignal) {
+          //     logger.log(`✅ Extreme signal (z=${absZ.toFixed(2)}) overrides max price at ${minsLeft.toFixed(1)}m`);
+          //     // Allow trading, skip max price check
+          //   } else if (target > maxPrice) {
+          //     logger.log(`Layer ${i}: skip, price ${target.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
+          //     continue;
+          //   }
+          // }
 
           const ev = sideProb - target;
           let minEv = LAYER_MIN_EV[i];
@@ -1776,7 +2028,7 @@ async function execForAsset(asset, priceData) {
     if (prob >= PROB_MIN_CORE && best.ask >= PRICE_MIN_CORE) riskBand = "core";
     else if (prob <= PROB_MAX_RISKY && best.ask <= PRICE_MAX_RISKY) riskBand = "risky";
 
-    const size = sizeForTrade(best.ev, minsLeft, { riskBand });
+    const size = sizeForTrade(best.ev, minsLeft, { riskBand, minEdgeOverride: dynamicMinEdge });
     if (size <= 0) { 
       logger.log(`EV>0 but size=0`); 
       return; 
@@ -1795,15 +2047,18 @@ async function execForAsset(asset, priceData) {
       return;
     }
 
-    const sizeInfo = minsLeft > 5 ? ` (Early trade: ${(size / EARLY_TRADE_SIZE_MULTIPLIER).toFixed(0)} → ${size})` : '';
-
     // BUG FIX #3: Store entryZ right before placing order
     if (state.entryZ === null) {
       state.entryZ = z;
       logger.log(`[Entry Signal] Stored z=${z.toFixed(2)} (NORMAL entry)`);
     }
 
-    const maxPrice = getMaxPriceForTime(minsLeft);
+    let maxPrice = getMaxPriceForTime(minsLeft);
+    if (absZ > 3.0) {
+      maxPrice = 0.98;
+      logger.log(`🚀 Z=${z.toFixed(2)} overrides time-based price cap. New max: 0.98`);
+    }
+
     if (best.ask > maxPrice) {
       logger.log(`🛑 Price ${best.ask.toFixed(2)} > ${maxPrice.toFixed(2)} max (${minsLeft.toFixed(1)}m left)`);
       return;
@@ -1826,7 +2081,7 @@ async function execForAsset(asset, priceData) {
       }
     }
 
-    logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size}${sizeInfo})`);
+    logger.log(`SIGNAL: BUY ${best.side} @ ${best.ask.toFixed(2)} (Size: ${size})`);
 
     try {
       const resp = await client.createAndPostOrder({

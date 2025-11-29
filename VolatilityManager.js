@@ -10,8 +10,8 @@ const MIN_DATA_POINTS = 10;
 const MIN_VOL_BPS = {
   BTC: 3.5,  // Lowered to capture more BTC volume (your best asset)
   ETH: 5.0,  // Keep steady
-  SOL: 8.0,  // Raised to reduce noise/churn (your worst asset)
-  XRP: 6.0,  // Keep steady
+  SOL: 6.0,  // Raised to reduce noise/churn (your worst asset)
+  XRP: 5.0,  // Keep steady
 };
 
 // Map your symbols to Binance pairs for backfill
@@ -111,8 +111,10 @@ function getRealizedVolatility(symbol, currentPrice) {
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
   const stdDevReturns = Math.sqrt(variance); // This is % volatility
-  
+
   const calculatedSigmaUSD = currentPrice * stdDevReturns;
+
+  // console.log(`📊 Volatility: [${symbol}] Calculated=$${calculatedSigmaUSD.toFixed(2)}, Floor=$${dynamicFloorUSD.toFixed(2)}, Using=$${Math.max(calculatedSigmaUSD, dynamicFloorUSD).toFixed(2)}`);
 
   // Return the higher of Realized Vol or the BPS Floor
   return Math.max(calculatedSigmaUSD, dynamicFloorUSD);
