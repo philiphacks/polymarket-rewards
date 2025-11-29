@@ -329,6 +329,165 @@ function checkBasisRiskHybrid(currentPrice, startPrice, minsLeft, z, pUp, pDown,
   return { safe: true, reason: "No clear signal" };
 }
 
+/**
+ * Get actual token positions from Polymarket Data API
+ * This queries the real on-chain positions, not just what we think we have
+ */
+async function getActualPositions(userAddress, tokenIds, logger) {
+  try {
+    const [upTokenId, downTokenId] = tokenIds;
+    
+    // Query Data API for user's positions
+    const url = `https://data-api.polymarket.com/positions?user=${userAddress}`;
+    
+    logger.log(`🔍 Querying Data API for actual positions...`);
+    
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      logger.error(`Data API returned ${response.status}: ${response.statusText}`);
+      return null;
+    }
+    
+    const positions = await response.json();
+    
+    if (!Array.isArray(positions)) {
+      logger.error(`Data API returned unexpected format: ${typeof positions}`);
+      return null;
+    }
+    
+    // Find positions matching our token IDs
+    let upShares = 0;
+    let downShares = 0;
+    
+    for (const position of positions) {
+      const asset = position.asset;
+      const size = Number(position.size || 0);
+      
+      if (asset === upTokenId) {
+        upShares = size;
+        logger.log(`   UP: ${size} shares @ avg $${position.avgPrice?.toFixed(3)}`);
+      } else if (asset === downTokenId) {
+        downShares = size;
+        logger.log(`   DOWN: ${size} shares @ avg $${position.avgPrice?.toFixed(3)}`);
+      }
+    }
+    
+    logger.log(`   Total: ${upShares} UP, ${downShares} DOWN`);
+    
+    return { UP: upShares, DOWN: downShares };
+    
+  } catch (err) {
+    logger.error(`Failed to get actual positions: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Reconcile tracked positions with actual on-chain positions
+ * CRITICAL: Must account for pending orders that haven't filled yet
+ */
+async function reconcilePositions(state, logger) {
+  try {
+    const { tokenIds, slug } = state.marketMeta;
+    const [upTokenId, downTokenId] = tokenIds;
+    
+    // Check if we have pending orders for THIS specific market
+    const pendingForMarket = Array.from(pendingOrders.entries())
+      .filter(([orderId, data]) => data.slug === slug);
+    
+    if (pendingForMarket.length > 0) {
+      // Check age of oldest order
+      const oldestTimestamp = Math.min(...pendingForMarket.map(([id, data]) => data.timestamp));
+      const age = Date.now() - oldestTimestamp;
+      
+      if (age < 30000) {
+        // Orders < 30s old - definitely wait
+        logger.log(`⏳ Skipping reconciliation: ${pendingForMarket.length} pending orders <30s old`);
+        return;
+      } else if (age < 60000) {
+        // Orders 30-60s old - probably still filling, wait unless critical
+        logger.log(`⏳ Skipping reconciliation: pending orders ${(age/1000).toFixed(0)}s old (waiting for settlement)`);
+        return;
+      } else {
+        // Orders >60s old - likely settled (even if partially), safe to reconcile
+        logger.warn(`⚠️  Reconciling despite ${pendingForMarket.length} pending: orders ${(age/1000).toFixed(0)}s old (likely settled)`);
+        // Continue to reconciliation
+      }
+    }
+    
+    const actual = await getActualPositions(FUNDER, tokenIds, logger);
+    
+    if (!actual) return;
+    
+    const tracked = state.sideSharesBySlug[slug] || { UP: 0, DOWN: 0 };
+    
+    const upDiff = Math.abs(actual.UP - tracked.UP);
+    const downDiff = Math.abs(actual.DOWN - tracked.DOWN);
+    
+    // Only reconcile if significant difference (>5 shares or >10%)
+    const upThreshold = Math.max(5, tracked.UP * 0.1);
+    const downThreshold = Math.max(5, tracked.DOWN * 0.1);
+    
+    if (upDiff > upThreshold || downDiff > downThreshold) {
+      logger.warn(`📊 POSITION RECONCILIATION NEEDED`);
+      logger.warn(`   UP: Tracked ${tracked.UP} → Actual ${actual.UP} (diff: ${upDiff})`);
+      logger.warn(`   DOWN: Tracked ${tracked.DOWN} → Actual ${actual.DOWN} (diff: ${downDiff})`);
+      
+      let shouldReconcile = false;
+      let reconcileReason = '';
+      
+      // RULE 1: Actual > Tracked = fills came in, always safe
+      if (actual.UP > tracked.UP || actual.DOWN > tracked.DOWN) {
+        shouldReconcile = true;
+        reconcileReason = 'Actual > Tracked (fills came in)';
+      }
+      
+      // RULE 2: Both zero = market expired or fully exited
+      else if (actual.UP === 0 && actual.DOWN === 0 && (tracked.UP > 0 || tracked.DOWN > 0)) {
+        shouldReconcile = true;
+        reconcileReason = 'Both positions zero (expired/exited)';
+      }
+      
+      // RULE 3: Partial fill - tracked > actual but actual > 0
+      else if (tracked.UP > actual.UP && actual.UP > 0 && tracked.DOWN === 0) {
+        shouldReconcile = true;
+        reconcileReason = `Partial fill: UP ${tracked.UP} → ${actual.UP}`;
+      }
+      else if (tracked.DOWN > actual.DOWN && actual.DOWN > 0 && tracked.UP === 0) {
+        shouldReconcile = true;
+        reconcileReason = `Partial fill: DOWN ${tracked.DOWN} → ${actual.DOWN}`;
+      }
+      
+      // RULE 4: Single position decreased (exit or sale)
+      else if (tracked.UP === 0 && actual.DOWN < tracked.DOWN && tracked.DOWN > 0) {
+        shouldReconcile = true;
+        reconcileReason = `DOWN decreased ${tracked.DOWN} → ${actual.DOWN}`;
+      }
+      else if (tracked.DOWN === 0 && actual.UP < tracked.UP && tracked.UP > 0) {
+        shouldReconcile = true;
+        reconcileReason = `UP decreased ${tracked.UP} → ${actual.UP}`;
+      }
+      
+      // RULE 5: Don't reconcile - probably pending fills
+      else {
+        logger.warn(`⚠️  NOT reconciling: Tracked > Actual suggests pending fills`);
+        logger.warn(`   This is expected immediately after placing orders`);
+        logger.warn(`   Will reconcile after orders complete or on next cycle`);
+        return;
+      }
+
+      if (shouldReconcile) {
+        logger.log(`✅ Reconciling: ${reconcileReason}`);
+        state.sideSharesBySlug[slug] = { UP: actual.UP, DOWN: actual.DOWN };
+        logger.log(`✅ Positions reconciled to actual values`);
+      }
+    }
+  } catch (err) {
+    logger.error(`Position reconciliation failed: ${err.message}`);
+  }
+}
+
 // ---------- UTILS ----------
 
 function current15mStartUnix(date = new Date()) {
@@ -723,6 +882,12 @@ async function execForAsset(asset, priceData) {
 
     if (sharesUp > 0 && pUp < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding UP but pUp=${pUp.toFixed(4)}`);
     if (sharesDown > 0 && pDown < 0.50) logger.log(`>>> COUNTERSIGNAL: Holding DOWN but pDown=${pDown.toFixed(4)}`);
+
+    if (sharesUp > 5 || sharesDown > 5) {
+      // Only reconcile if we have a significant position
+      // This catches fill discrepancies before exit logic
+      await reconcilePositions(state, logger);
+    }
 
     if (z > 0 && z < 0.8 && sharesUp >= MAX_SHARES_WEAK_SIGNAL) {
       logger.log(`⛔ Weak signal position limit: ${sharesUp} shares with z=${z.toFixed(2)}`);

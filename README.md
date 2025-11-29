@@ -27,11 +27,13 @@ https://polymarket.com/@Halfapound?via=marko_poly
 
 Run with
 `pm2 start crypto.js --name polymarket-bot`
+`pm2 start altcrypto.js --name altpolymarket-bot`
 `pm2 start history.js --name prices-bot`
 
 Stop
 `pm2 stop polymarket-bot`
 `pm2 stop prices-bot`
+`pm2 stop altpolymarket-bot`
 
 or if that doesn't work use `pm2 list` and use `pm2 stop <ID>`.
 
