@@ -1635,8 +1635,20 @@ async function execForAsset(asset, priceData) {
       }
 
       if (lateSide) {
-        if (minsLeft < 2 && sideAsk > LATE_GAME_MAX_PRICE) {
-          logger.log(`⛔ LATE GAME: ${(sideAsk*100).toFixed(0)}¢ > ${LATE_GAME_MAX_PRICE}¢ max`);
+        // Time-graduated maximum prices for LATE_LAYER
+        // Stricter caps as we get closer to expiry (higher gamma risk)
+        let lateGameMax;
+        if (minsLeft < 0.5) {
+          lateGameMax = 0.85;  // <30s: very strict (need 85%+ win rate)
+        } else if (minsLeft < 1.0) {
+          lateGameMax = 0.88;  // <1min: strict (need 88%+ win rate)
+        } else if (minsLeft < 1.5) {
+          lateGameMax = 0.92;  // <90s: moderate (need 92%+ win rate)
+        } else {
+          lateGameMax = LATE_GAME_MAX_PRICE;  // <2min: 95¢ (need 95%+ win rate)
+        }
+        if (sideAsk > lateGameMax) {
+          logger.log(`⛔ LATE GAME: ${(sideAsk*100).toFixed(0)}¢ > ${(lateGameMax*100).toFixed(0)}¢ max @ ${(minsLeft*60).toFixed(0)}s left`);
           logger.log(`   ${asset.symbol}: Too close to expiry for expensive bets`);
           return;
         }
